@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  /* mimic existing ticket create form styling */
+  .cv-page{padding:18px;background:linear-gradient(180deg,#eef2ff,#f7faff);}
+  .cv-card{max-width:1100px;margin:0 auto;background:#fff;border:1px solid #d8d9ff;border-radius:14px;box-shadow:0 10px 26px rgba(76,29,149,0.12);padding:18px 18px 22px;}
+  .cv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px 16px;align-items:end;}
+  .cv-field{display:flex;flex-direction:column;gap:6px;}
+  .cv-field label{font-weight:700;font-size:13px;color:#1f2937;}
+  .cv-input, .cv-select, .cv-textarea{
+    width:100%;padding:12px 14px;border:1px solid #c8c9ff;border-radius:12px;
+    box-shadow:0 4px 10px rgba(76,29,149,0.10);font-size:14px;box-sizing:border-box;min-height:44px;
+  }
+  .cv-textarea{min-height:90px;resize:vertical;}
+  .pill-btn{border:1px solid transparent;border-radius:12px;padding:12px 16px;cursor:pointer;font-weight:700;transition:all .15s;}
+  .pill-secondary{
+    background:linear-gradient(90deg,#0f7a4f 0%, #0451c4 100%);
+    color:#fff;
+    box-shadow:0 6px 14px rgba(15,122,79,0.25);
+  }
+  .pill-secondary:disabled{opacity:.7;cursor:not-allowed;}
+  .pill-ghost{background:#fff;border:1px solid #d7dce5;color:#0f172a;}
+  .pill-btn:hover{transform:translateY(-1px);box-shadow:0 6px 12px rgba(0,0,0,.08);}
+  .cv-table-wrap{margin-top:12px;}
+  .cv-table{width:100%;border-collapse:collapse;border:1px solid #d4d7e0;border-radius:10px;overflow:hidden;}
+  .cv-table th{background:#0d41a8;color:#fff;font-weight:700;}
+  .cv-table th,.cv-table td{border:1px solid #dfe3eb;padding:8px;}
+  .cv-table input{border:1px solid #c4c7d1;border-radius:6px;padding:6px 8px;width:100%;box-sizing:border-box;box-shadow:none;min-height:34px;}
+  .cv-actions{display:flex;gap:10px;margin-top:12px;}
+</style>
+
+<div class="cv-page">
+  <div class="cv-card">
+    <h3 style="margin:0 0 14px 0;">Raise CV Ticket</h3>
+
+    <div style="display:flex;gap:12px;align-items:flex-end;margin-bottom:16px;">
+      <div class="cv-field" style="flex:1 1 60%;">
+        <label>Patient ID</label>
+        <input id="patient_id" class="cv-input" placeholder="Enter Labmate ID">
+      </div>
+      <div class="cv-field" style="flex:0 0 180px;">
+        <label>&nbsp;</label>
+        <button class="pill-btn pill-secondary" id="btnFetch" type="button" style="width:100%;">Fetch Details</button>
+      </div>
+    </div>
+
+    <div class="cv-grid" style="margin-top:4px;">
+      <div class="cv-field">
+        <label>Patient Name</label>
+        <input id="patient_name" class="cv-input" placeholder="Enter patient name">
+      </div>
+      <div class="cv-field">
+        <label>Mobile</label>
+        <input id="mobile_number" class="cv-input" placeholder="Enter mobile number">
+      </div>
+      <div class="cv-field">
+        <label>Assign To</label>
+        <select id="assign_to_user_id" class="cv-select"></select>
+      </div>
+      <div class="cv-field" style="grid-column:1 / span 2;">
+        <label>Remarks</label>
+        <textarea id="additional_info" class="cv-textarea" placeholder="Notes for team"></textarea>
+      </div>
+    </div>
+
+    <div class="cv-table-wrap">
+      <h5 style="margin:12px 0 6px;">Tests</h5>
+      <table id="testsTable" class="cv-table">
+        <thead><tr><th style="width:8%;">Sr.</th><th style="width:38%;">Test</th><th style="width:27%;">Value</th><th style="width:27%;">Result</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="sr-col">1</td>
+            <td><input name="test_name" class="cv-input"></td>
+            <td><input name="value_text" class="cv-input"></td>
+            <td><input name="result_text" class="cv-input"></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="cv-actions" style="justify-content:flex-end;">
+        <button class="pill-btn pill-ghost" id="addRow" type="button">Add Row</button>
+        <button class="pill-btn pill-secondary" id="submitCv" type="button">Create CV Ticket</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function loadAssignees() {
+  try {
+    const r = await fetch('/api/users/customer-care');
+    const j = await r.json();
+    const sel = document.getElementById('assign_to_user_id');
+    (j.users || []).forEach(u => {
+      const opt = document.createElement('option');
+      opt.value = u.id; opt.textContent = u.name;
+      sel.appendChild(opt);
+    });
+    // default select current user if present; else fallback to first
+    const meId = "{{ session.get('user_id') or '' }}";
+    const meOpt = [...sel.options].find(o => o.value === meId);
+    if (meOpt) {
+      sel.value = meId;
+    } else {
+      const target = [...sel.options].find(o => (o.textContent || '').toLowerCase().includes('ritu mahlwal'));
+      if (target) {
+        sel.value = target.value;
+      } else if (sel.options.length) {
+        sel.selectedIndex = 0;
+      }
+    }
+  } catch(err) {
+    console.error('assignees load error', err);
+  }
+}
+
+document.getElementById('addRow').onclick = () => {
+  const tr = document.createElement('tr');
+  const idx = document.querySelectorAll('#testsTable tbody tr').length + 1;
+  tr.innerHTML = `<td class="sr-col">${idx}</td><td><input name="test_name" class="cv-input"></td><td><input name="value_text" class="cv-input"></td><td><input name="result_text" class="cv-input"></td>`;
+  document.querySelector('#testsTable tbody').appendChild(tr);
+};
+
+document.getElementById('submitCv').onclick = async () => {
+  const tests = [...document.querySelectorAll('#testsTable tbody tr')].map(tr => ({
+    test_name: tr.querySelector('input[name="test_name"]').value,
+    value_text: tr.querySelector('input[name="value_text"]').value,
+    result_text: tr.querySelector('input[name="result_text"]').value,
+  })).filter(t => t.test_name.trim());
+
+  const payload = {
+    patient_labmate_id: document.getElementById('patient_id').value,
+    patient_name: document.getElementById('patient_name').value,
+    mobile_number: document.getElementById('mobile_number').value,
+    country_code: '+91',
+    assign_to_user_id: document.getElementById('assign_to_user_id').value,
+    additional_info: document.getElementById('additional_info').value,
+    tests
+  };
+
+  const res = await fetch('/tickets/cv/create', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const j = await res.json();
+  if (j.ok) {
+    alert('Created CV Ticket ID ' + j.ticket_id);
+  } else {
+    alert('Error: ' + j.error);
+  }
+};
+
+document.getElementById('btnFetch').onclick = async () => {
+  const pid = document.getElementById('patient_id').value;
+  if (!pid) return alert('Enter Patient ID first');
+  const btn = document.getElementById('btnFetch');
+  const prevTxt = btn.textContent;
+  btn.textContent = 'Fetching...';
+  btn.disabled = true;
+  try {
+    // Uses internal Labmate API via backend proxy
+    const r = await fetch('/api/proxy/labmate-patient', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ patientid: pid })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      document.getElementById('patient_name').value = j.name || '';
+      document.getElementById('mobile_number').value = j.mobile || '';
+    } else {
+      alert(j.error || 'No data found');
+    }
+  } catch(err) {
+    alert('Fetch failed');
+  } finally {
+    btn.textContent = prevTxt;
+    btn.disabled = false;
+  }
+};
+
+loadAssignees();
+</script>
+{% endblock %}
