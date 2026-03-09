@@ -480,6 +480,17 @@
                   <a href="{{ url_for('completedreport.index') }}"><span class="icon">✅</span> Completed Reports</a>
                 </div>
               </div>
+
+              <div class="menu-section has-sub">
+                <span class="section-label" tabindex="0">
+                  <span class="icon">&#128137;</span> Venepuncture
+                </span>
+                <div class="submenu">
+                  <a href="{{ url_for('venepunchre.venepunchre_form') }}"><span class="icon">&#128137;</span> VENP FORM</a>
+                  <a href="{{ url_for('venepunchre.venepunchre_records') }}"><span class="icon">&#128196;</span> VENP RECORDS</a>
+                </div>
+              </div>
+
               {% endif %}
             </div>
           </div>

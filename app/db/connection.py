@@ -32,6 +32,15 @@ FAIL_MSG_DB = {
     "database": os.getenv("FAIL_NAME", "labmaterecod"),
 }
 
+VENE_DB = {
+    "host": os.getenv("VENE_HOST", "192.168.0.173"),
+    "port": int(os.getenv("VENE_PORT", "8091")),
+    "user": os.getenv("VENE_USER", "root"),
+    "password": os.getenv("VENE_PASSWORD", "example"),
+    "database": os.getenv("VENE_NAME", "hiccup_ticket"),
+    "connection_timeout": int(os.getenv("VENE_TIMEOUT", "5")),
+}
+
 
 # ---------------- Lead Management DB ----------------
 def get_db_connection():
@@ -55,6 +64,11 @@ def get_whatsapp_connection():
 def get_fail_message_connection():
     """Connection helper for fail message DB (labmatewhats)."""
     return mysql.connector.connect(**FAIL_MSG_DB)
+
+
+def get_venepunchre_connection():
+    """Connection helper for venepunchre hiccup_ticket DB."""
+    return mysql.connector.connect(**VENE_DB)
 
 
 def get_whatsapp_groups_connection():
