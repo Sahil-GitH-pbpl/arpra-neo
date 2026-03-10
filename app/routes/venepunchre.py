@@ -46,7 +46,7 @@ RESPONSE_REMINDER_MINUTES = int(os.getenv("VENE_RESPONSE_REMINDER_MINUTES", "120
 PHLEBO_DESIGNATIONS = {
     part.strip() for part in os.getenv("VENE_PHLEBO_DESIGNATIONS", "Home Collection Phlebo,Center Phlebo").split(",") if part.strip()
 }
-RESOLVE_DETAIL_USER_NAMES = os.getenv("VENE_RESOLVE_DETAIL_USER_NAMES", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+RESOLVE_DETAIL_USER_NAMES = os.getenv("VENE_RESOLVE_DETAIL_USER_NAMES", "1").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 # Users allowed to escalate / close NC flow
 NC_CONTROL_USER_IDS = {
@@ -126,6 +126,34 @@ def resolve_user_name(user_id):
     if isinstance(profile, tuple):
         return profile[1] if len(profile) > 1 else None
     return profile.get("name")
+
+
+def resolve_user_names_bulk(user_ids):
+    """Resolve multiple main DB user ids in one query for faster detail rendering."""
+    ids = sorted({safe_int(uid) for uid in (user_ids or []) if safe_int(uid)})
+    if not ids:
+        return {}
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(ids))
+            cur.execute(
+                f"SELECT id, name FROM users WHERE id IN ({placeholders})",
+                tuple(ids),
+            )
+            rows = cur.fetchall() or []
+            mapping = {}
+            for row in rows:
+                if isinstance(row, dict):
+                    mapping[safe_int(row.get("id"))] = row.get("name")
+                elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                    mapping[safe_int(row[0])] = row[1]
+            return {k: v for k, v in mapping.items() if k and v}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _ensure_logged_in():
@@ -879,11 +907,16 @@ def venepunchre_record_detail(hiccup_id):
         except Exception:
             pass
 
-    # Optional user-name resolve; disabled by default to avoid slow page loads when main DB is slow.
+    # Optional user-name resolve via a single bulk query (fast for detail page).
     if RESOLVE_DETAIL_USER_NAMES:
-        row["escalated_by_name"] = resolve_user_name(row.get("escalated_by"))
-        row["nc_assigned_staff_name"] = resolve_user_name(row.get("nc_assigned_staff_id"))
-        row["response_by_name"] = resolve_user_name(row.get("response_by"))
+        name_map = resolve_user_names_bulk([
+            row.get("escalated_by"),
+            row.get("nc_assigned_staff_id"),
+            row.get("response_by"),
+        ])
+        row["escalated_by_name"] = name_map.get(safe_int(row.get("escalated_by")))
+        row["nc_assigned_staff_name"] = name_map.get(safe_int(row.get("nc_assigned_staff_id")))
+        row["response_by_name"] = name_map.get(safe_int(row.get("response_by")))
     else:
         row["escalated_by_name"] = None
         row["nc_assigned_staff_name"] = None
