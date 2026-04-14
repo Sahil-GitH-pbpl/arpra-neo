@@ -1,6 +1,7 @@
 # tickets.py — unified route for both CCE and ODT
 from flask import render_template 
 import json
+from app.alerts import send_whatsapp_to_number
 import re
 import math
 from datetime import datetime, timedelta
@@ -649,7 +650,9 @@ def tickets_cv_create():
 
             # Insert tests
             rows = []
+            test_names = []
             for t in tests:
+                test_names.append((t.get("test_name") or "").strip())
                 rows.append(
                     (
                         ticket_id,
@@ -680,7 +683,32 @@ def tickets_cv_create():
         except Exception:
             pass
 
-    # WhatsApp on create disabled (logic retained for future toggle)
+    # WhatsApp send on create (patient, doctor, panel) – now enabled
+    try:
+        recipient_list = []
+        patient_mobile = (mobile_number or "").strip()
+        if patient_mobile:
+            recipient_list.append(patient_mobile)
+        doc_pan = json.loads(doc_pan_json or "{}")
+        doc_mobile = ((doc_pan.get("doctor") or {}).get("mobile") or "").strip()
+        panel_mobile = ((doc_pan.get("panel") or {}).get("mobile") or "").strip()
+        if doc_mobile:
+            recipient_list.append(doc_mobile)
+        if panel_mobile:
+            recipient_list.append(panel_mobile)
+
+        test_name_for_msg = test_names[0] if test_names else "your test"
+        msg = (
+            f"⚠️ IMPORTANT: URGENT LAB RESULT\n"
+            f"Dear {patient_name or 'Patient'}\n"
+            f"Your {test_name_for_msg} report is attached and requires urgent clinical review.\n"
+            f"Kindly consult your treating doctor immediately.\n"
+            f"This message does not replace medical advice."
+        )
+        for phone in recipient_list:
+            send_whatsapp_to_number(phone, msg)
+    except Exception:
+        pass
 
     return jsonify({"ok": True, "ticket_id": ticket_id}), 200
 
@@ -841,7 +869,7 @@ def proxy_labmate_patient():
             return jsonify({"ok": False, "error": "Patient ID required"}), 400
 
         # Updated Labmate patient fetch endpoint (internal)
-        labmate_url = "http://192.168.0.252:8000/reportapi/LabmatePatRegistration.svc/Getpatientdatabymobileno"
+        labmate_url = "http://10.1.1.252:8000/reportapi/LabmatePatRegistration.svc/Getpatientdatabymobileno"
         
         response = requests.post(
             labmate_url,

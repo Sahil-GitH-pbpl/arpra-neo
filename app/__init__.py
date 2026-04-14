@@ -33,6 +33,10 @@ def create_app():
     from app.routes.cce_calls import cce_calls_bp
     from app.routes.failurereport import failurereport_bp
     from app.routes.completedreport import completedreport_bp
+    from app.routes.venepunchre import venepunchre_bp
+    from app.routes.hhome_collection import hhome_collection_bp, service as hhome_collection_service
+    from app.routes.hhome_collection_dashboard import hhome_collection_dashboard_bp
+    from app.routes.concentform import concentform_bp
     
 
     app.register_blueprint(auth_bp)
@@ -54,6 +58,16 @@ def create_app():
     app.register_blueprint(cce_calls_bp)
     app.register_blueprint(failurereport_bp, url_prefix='/failurereport')
     app.register_blueprint(completedreport_bp, url_prefix='/completedreport')
+    app.register_blueprint(venepunchre_bp)
+    app.register_blueprint(hhome_collection_bp)
+    app.register_blueprint(hhome_collection_dashboard_bp)
+    app.register_blueprint(concentform_bp)
+
+    # Warm once on server start: panel/company + GST catalog for fast HC test booking.
+    try:
+        hhome_collection_service.preload_panel_catalog()
+    except Exception as exc:
+        app.logger.error(f"[hhome_collection preload] failed: {exc}")
 
     # ---------- CCE popup globals (available on every template) ----------
     # Default to local Exotel listener port if env not set.

@@ -13,9 +13,9 @@ alerts_bp = Blueprint('alerts', __name__)
 # =========================
 # Config
 # =========================
-API_TOKEN = "61e3f2cd978650537d9223e7"
-# Group ID ya mobile (StewIndia format)
-WHATSAPP_MOBILE = "917838104597-1635675661"
+# Local WA API
+WHATSAPP_API_URL = "http://10.1.1.44:3004/api/messages/send"
+DEFAULT_ACCOUNT_ID = 1
 
 # =========================
 # Logger Setup
@@ -34,36 +34,20 @@ if not logger.handlers:
 # =========================
 def send_whatsapp_to_number(phone: str, message: str):
     """
-    StewIndia sendText API wrapper with detailed logs.
-    Returns: (status_code: int, response_text: str)
+    Local WA API wrapper.
+    POST http://10.1.1.44:3004/api/messages/send
+    body: { "accountId": DEFAULT_ACCOUNT_ID, "target": phone, "message": message }
     """
-    req_id = str(uuid.uuid4())[:8]  # short trace id for this attempt
+    req_id = str(uuid.uuid4())[:8]  # short trace id
     try:
-        url = "http://mediaapi.stewindia.com/api/sendText"
-        safe_token = (API_TOKEN[:4] + "****") if API_TOKEN else "None"
-
-        logger.info(
-            "WA[%s] → Preparing sendText | phone=%s | len(message)=%s | token=%s",
-            req_id, phone, len(message or ""), safe_token
+        logger.info("WA[%s] → Preparing send | phone=%s | len(message)=%s", req_id, phone, len(message or ""))
+        r = requests.post(
+            WHATSAPP_API_URL,
+            json={"accountId": DEFAULT_ACCOUNT_ID, "target": phone, "message": message},
+            timeout=10,
         )
-
-        r = requests.get(
-            url,
-            params={
-                "token": API_TOKEN,
-                "phone": phone,
-                "message": message
-            },
-            timeout=10
-        )
-
-        logger.info(
-            "WA[%s] ← Response | status=%s | body=%s",
-            req_id, r.status_code, (r.text[:500] if r.text else "")
-        )
-
+        logger.info("WA[%s] ← Response | status=%s | body=%s", req_id, r.status_code, (r.text[:500] if r.text else ""))
         return r.status_code, r.text
-
     except Exception as e:
         logger.exception("WA[%s] ❌ send_whatsapp_to_number exception: %s", req_id, e)
         return 500, str(e)

@@ -19,26 +19,33 @@ LABMATE_DB = {
 }
 
 WHATSAPP_DB = {
-    "host": os.getenv("WA_HOST", "192.168.0.167"),
+    "host": os.getenv("WA_HOST", "10.1.1.51"),
     "user": os.getenv("WA_USER", "sahil"),
     "password": os.getenv("WA_PASSWORD", "sahil@123"),
     "database": os.getenv("WA_NAME", "creoianw_bhasin"),
 }
 
 FAIL_MSG_DB = {
-    "host": os.getenv("FAIL_HOST", "192.168.0.167"),
+    "host": os.getenv("FAIL_HOST", "10.1.1.51"),
     "user": os.getenv("FAIL_USER", "sahil"),
     "password": os.getenv("FAIL_PASSWORD", "sahil@123"),
     "database": os.getenv("FAIL_NAME", "labmaterecod"),
 }
 
 VENE_DB = {
-    "host": os.getenv("VENE_HOST", "192.168.0.173"),
+    "host": os.getenv("VENE_HOST", "10.1.1.53"),
     "port": int(os.getenv("VENE_PORT", "8091")),
     "user": os.getenv("VENE_USER", "root"),
     "password": os.getenv("VENE_PASSWORD", "example"),
     "database": os.getenv("VENE_NAME", "hiccup_ticket"),
     "connection_timeout": int(os.getenv("VENE_TIMEOUT", "5")),
+}
+
+BHASIN7001_DB = {
+    "host": os.getenv("B7001_HOST", "localhost"),
+    "user": os.getenv("B7001_USER", "root"),
+    "password": os.getenv("B7001_PASSWORD", ""),
+    "database": os.getenv("B7001_NAME", "bhasin_7001"),
 }
 
 
@@ -69,6 +76,11 @@ def get_fail_message_connection():
 def get_venepunchre_connection():
     """Connection helper for venepunchre hiccup_ticket DB."""
     return mysql.connector.connect(**VENE_DB)
+
+
+def get_bhasin7001_connection():
+    """Connection helper for bhasin_7001 DB."""
+    return pymysql.connect(**BHASIN7001_DB, cursorclass=pymysql.cursors.DictCursor)
 
 
 def get_whatsapp_groups_connection():

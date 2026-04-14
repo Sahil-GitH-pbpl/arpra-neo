@@ -60,14 +60,14 @@ def login():
             user = cursor.fetchone()
         
         if user and user.get("dob_ddmmyyyy") == password:
-            # 🆕 MANUAL OVERRIDE: Aman Shukla 
+            # ðŸ†• MANUAL OVERRIDE: Aman Shukla 
             designation = user["designation"]
             if user["name"].lower().strip() == "aman shukla":
                 designation = "Admin"
             
             session["user_id"] = user["id"]
             session["username"] = user["name"]
-            session["designation"] = designation  # 🆕 Overridden designation use karo
+            session["designation"] = designation  # ðŸ†• Overridden designation use karo
             
             nxt = _safe_next_url(raw_next) or (url_for("dashboard.dashboard") + "#%2Flead-form")
             return redirect(nxt)

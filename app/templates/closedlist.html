@@ -146,11 +146,11 @@ th.actions-col, td.actions-col { width:120px; text-align:center; }
 
 <div style="display:flex; gap:8px; align-items:center; margin-top:10px; justify-content:flex-end;">
   {% if has_prev %}
-    <a class="pager-btn" href="{{ url_for('closedlist.closed_list', page=page-1, page_size=page_size, date_from=date_from, date_to=date_to, q=q) }}">Prev</a>
+    <a class="pager-btn" href="{{ url_for('closedlist.closed_list', page=page-1, page_size=page_size, date_from=date_from, date_to=date_to, q=q, origin=origin) }}">Prev</a>
   {% endif %}
   <div>Page {{ page }}</div>
   {% if has_next %}
-    <a class="pager-btn" href="{{ url_for('closedlist.closed_list', page=page+1, page_size=page_size, date_from=date_from, date_to=date_to, q=q) }}">Next</a>
+    <a class="pager-btn" href="{{ url_for('closedlist.closed_list', page=page+1, page_size=page_size, date_from=date_from, date_to=date_to, q=q, origin=origin) }}">Next</a>
   {% endif %}
 </div>
 {% endblock %}

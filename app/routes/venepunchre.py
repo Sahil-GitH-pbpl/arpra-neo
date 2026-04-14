@@ -30,7 +30,7 @@ venepunchre_bp = Blueprint("venepunchre", __name__)
 # ---- Config (env-first) ----
 PATIENT_LOOKUP_URL = os.getenv(
     "PATIENT_LOOKUP_URL",
-    "http://192.168.0.252:8000/reportapi/LabmatePatRegistration.svc/Getpatientdatabymobileno",
+    "http://10.1.1.252:8000/reportapi/LabmatePatRegistration.svc/Getpatientdatabymobileno",
 )
 PATIENT_LOOKUP_TIMEOUT = int(os.getenv("PATIENT_LOOKUP_TIMEOUT", "8"))
 EVIDENCE_UPLOAD_SUBDIR = (
@@ -58,7 +58,7 @@ NC_CONTROL_USER_IDS = {
 # WhatsApp config
 WHATSAPP_API_URL = os.getenv(
     "WHATSAPP_API_URL",
-    "http://192.168.0.71:3004/api/messages/send",  # default same as legacy app
+    "http://10.1.1.44:3004/api/messages/send",  # default same as legacy app
 ).strip()
 WHATSAPP_ACCOUNT_ID = int(os.getenv("WHATSAPP_ACCOUNT_ID", "1"))
 WHATSAPP_TIMEOUT = int(os.getenv("WHATSAPP_TIMEOUT", "2"))
@@ -840,7 +840,7 @@ def venepunchre_records():
                    status, created_at, nc_assigned_staff_id, escalated_by
             FROM venepunchre_records
             {where_sql}
-            ORDER BY id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT %s OFFSET %s
             """,
             params + [RECORDS_PAGE_SIZE + 1, offset],

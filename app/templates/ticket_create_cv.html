@@ -49,27 +49,27 @@
     <div class="cv-grid" style="margin-top:4px;">
       <div class="cv-field">
         <label>Patient Name</label>
-        <input id="patient_name" class="cv-input" placeholder="Patient name" readonly>
+        <input id="patient_name" class="cv-input" placeholder="Patient name">
       </div>
       <div class="cv-field">
         <label>Mobile</label>
-        <input id="mobile_number" class="cv-input" placeholder="Mobile number" readonly>
+        <input id="mobile_number" class="cv-input" placeholder="Mobile number">
       </div>
       <div class="cv-field">
         <label>Doctor</label>
-        <input id="doctor_name" class="cv-input" placeholder="Doctor" readonly>
+        <input id="doctor_name" class="cv-input" placeholder="Doctor">
       </div>
       <div class="cv-field">
         <label>Doctor Mobile</label>
-        <input id="doctor_mobile" class="cv-input" placeholder="Doctor mobile" readonly>
+        <input id="doctor_mobile" class="cv-input" placeholder="Doctor mobile">
       </div>
       <div class="cv-field">
         <label>Panel</label>
-        <input id="panel_name" class="cv-input" placeholder="Panel" readonly>
+        <input id="panel_name" class="cv-input" placeholder="Panel">
       </div>
       <div class="cv-field">
         <label>Panel Mobile</label>
-        <input id="panel_mobile" class="cv-input" placeholder="Panel mobile" readonly>
+        <input id="panel_mobile" class="cv-input" placeholder="Panel mobile">
       </div>
       <div class="cv-field">
         <label>Assign To</label>
@@ -118,7 +118,8 @@ const CRITICAL_TESTS = [
 {"Test":"Potassium","Critical Low":"<=2.5","Critical High":">=6.5","Unit":"mmol/L","Notes":"Immediate alert (arrhythmia risk)."},
 {"Test":"Calcium (total)","Critical Low":"<=7.0","Critical High":">=13.0","Unit":"mg/dL","Notes":"Alert; consider albumin-corrected calcium if used."},
 {"Test":"Bilirubin – Total","Critical Low":"-","Critical High":">=20","Unit":"mg/dL","Notes":"Usually critical in neonates; for adults, alert if markedly high or acute. Consider neonatal bilirubin separate."},
-{"Test":"Troponin T / I","Critical Low":"-","Critical High":"Positive/Detected","Unit":"","Notes":"Treat as critical when positive per method cut-off; immediate clinician communication in ER/ICU settings."},
+{"Test":"Troponin T","Critical Low":"-","Critical High":"Positive/Detected","Unit":"","Notes":"Treat as critical when positive per method cut-off; immediate clinician communication in ER/ICU settings."},
+{"Test":"Troponin I","Critical Low":"-","Critical High":"Positive/Detected","Unit":"","Notes":"Treat as critical when positive per method cut-off; immediate clinician communication in ER/ICU settings."},
 {"Test":"Hemoglobin","Critical Low":"<=6.0","Critical High":">=20.0","Unit":"g/dL","Notes":"Immediate alert; define paediatric/neonate separately."},
 {"Test":"Platelet count","Critical Low":"<=20","Critical High":">=1000","Unit":"x10^3/µL","Notes":"Alert; “<=10” often “immediate.” Include bleeding risk statement."},
 {"Test":"WBC (total leukocyte count)","Critical Low":"<=2.0","Critical High":">=50.0","Unit":"x10^3/µL","Notes":"Alert; some labs use >=30–50 depending on clinician agreement."},
@@ -130,12 +131,10 @@ const CRITICAL_TESTS = [
 {"Test":"HCV","Critical Low":"Reactive/Positive","Critical High":"","Unit":"","Notes":"Same approach."},
 {"Test":"SARS-CoV-2","Critical Low":"Detected/Positive","Critical High":"","Unit":"","Notes":"Immediate as per clinical/public health requirement."},
 {"Test":"Influenza A/B, H1N1, H3N2, RSV","Critical Low":"Detected/Positive","Critical High":"","Unit":"","Notes":"Alert depends on setting (ER/ICU/high-risk). Define in policy."},
-{"Test":"Dengue NS1 / IgM","Critical Low":"Positive","Critical High":"","Unit":"","Notes":"Urgent alert (esp. NS1/IgM)."},
+{"Test":"Dengue NS1","Critical Low":"Positive","Critical High":"","Unit":"","Notes":"Urgent alert (esp. NS1)."},
+{"Test":"Dengue IgM","Critical Low":"Positive","Critical High":"","Unit":"","Notes":"Urgent alert (esp. IgM)."},
 {"Test":"RPR","Critical Low":"Reactive (esp. high titre)","Critical High":"","Unit":"","Notes":"Define titre threshold if you want graded urgency."},
-{"Test":"Malaria antigen / PS for MP","Critical Low":"Positive","Critical High":"","Unit":"","Notes":"Immediate alert; document."},
-{"Test":"Histopathology","Critical Low":"Malignancy","Critical High":"","Unit":"","Notes":""},
-{"Test":"FNAC","Critical Low":"Malignancy, AFB Positive","Critical High":"","Unit":"","Notes":""},
-{"Test":"LBC/Pap Smear","Critical Low":"HSIL, Malignancy","Critical High":"","Unit":"","Notes":""}
+{"Test":"Malaria antigen / PS for MP","Critical Low":"Positive","Critical High":"","Unit":"","Notes":"Immediate alert; document."}
 ];
 
 function parseThreshold(th){
@@ -303,15 +302,17 @@ document.getElementById('btnFetch').onclick = async () => {
     });
     const j = await r.json();
     if (j.ok) {
-      document.getElementById('patient_name').value = j.name || '';
-      document.getElementById('mobile_number').value = j.mobileno || '';
-      document.getElementById('doctor_name').value = j.doctor || '';
-      document.getElementById('doctor_mobile').value = j.doctormobile || '';
-      document.getElementById('panel_name').value = j.panel || '';
-      // panel mobile -> whatsapp field (API gives panel contact here)
-      document.getElementById('panel_mobile').value = j.whatsapp || '';
-      // patient mobile -> mobileno; if blank, keep empty (no whatsapp fallback)
-      document.getElementById('mobile_number').value = j.mobileno || '';
+      const setIf = (val, id) => {
+        if (val && String(val).trim() !== '') {
+          document.getElementById(id).value = val;
+        }
+      };
+      setIf(j.name, 'patient_name');
+      setIf(j.mobileno, 'mobile_number');
+      setIf(j.doctor, 'doctor_name');
+      setIf(j.doctormobile, 'doctor_mobile');
+      setIf(j.panel, 'panel_name');
+      setIf(j.whatsapp, 'panel_mobile');
     } else { alert(j.error || 'No data found'); }
   } catch(err) { alert('Fetch failed'); }
   finally { btn.textContent = prevTxt; btn.disabled = false; }

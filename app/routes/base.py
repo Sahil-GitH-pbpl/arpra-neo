@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import mysql.connector
+import os
 
 
 base_bp = Blueprint("base", __name__)
@@ -230,7 +231,7 @@ def tickets_failed_messages():
     failed_messages = 0
     try:
         labmate_conn = mysql.connector.connect(
-            host='192.168.0.167',
+            host='10.1.1.51',
             user='sahil',
             password='sahil@123',
             database='labmaterecod'
@@ -252,3 +253,44 @@ def tickets_failed_messages():
         current_app.logger.error(f"Failed to fetch failed messages count: {e}")
         failed_messages = 0
     return jsonify({"ok": True, "failed_messages": failed_messages})
+
+
+# ---------------- COMPLAINT COUNTER (separate) ----------------
+@base_bp.route("/api/tickets/complaint-count")
+def tickets_complaint_count():
+    if not session.get("user_id"):
+        return jsonify({"ok": False, "error": "Not logged in"}), 401
+
+    complaint_count = 0
+    conn = None
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("VOC_HOST", "10.1.1.53"),
+            port=int(os.getenv("VOC_PORT", "3308")),
+            user=os.getenv("VOC_USER", "arpra"),
+            password=os.getenv("VOC_PASSWORD", "arpra"),
+            database=os.getenv("VOC_NAME", "arpra_voc"),
+            connection_timeout=8,
+        )
+        with conn.cursor(dictionary=True) as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM feedback_responses
+                WHERE has_updates = 0
+                  AND status IN ('manual_review', 'ticket_created')
+                """
+            )
+            row = cur.fetchone() or {}
+            complaint_count = int(row.get("cnt") or 0)
+    except Exception as e:
+        current_app.logger.error(f"Failed to fetch complaint count: {e}")
+        complaint_count = 0
+    finally:
+        try:
+            if conn and conn.is_connected():
+                conn.close()
+        except Exception:
+            pass
+
+    return jsonify({"ok": True, "complaint_count": complaint_count})

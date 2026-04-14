@@ -1,0 +1,104 @@
+﻿<div id="step1-wrap">
+  <h5 class="section-header-like">Step 1 - Search & Select</h5>
+
+  <div class="row g-2 align-items-end caller-search-row">
+    <div class="col-md-6">
+      <label class="form-label">Mobile Number</label>
+      <input type="text" class="form-control mobile-search-input" id="search-mobile" placeholder="Enter primary or alternate mobile">
+    </div>
+    <div class="col-md-3 d-grid">
+      <button class="btn btn-primary mobile-search-btn" id="btn-search-caller">Search</button>
+    </div>
+    <div class="col-md-3">
+      <div id="caller-inline-chip" class="caller-inline-chip d-none"></div>
+    </div>
+  </div>
+
+  <div id="search-result" class="mt-3"></div>
+
+  <div id="step1-workspace" class="mt-4">
+    <div id="step1-workspace-note" class="alert alert-secondary py-2">
+      Search number first. If not found, save patient with contact details and caller will auto-create.
+    </div>
+    <div class="soft-divider"></div>
+    <div class="row g-3">
+      <div class="col-md-6">
+        <div class="border rounded p-2 h-100 patient-section-box">
+          <h6>Patients Found</h6>
+          <div id="selected-patient-tags" class="mb-2"></div>
+          <button class="btn btn-outline-primary btn-sm action-pill-btn" id="btn-show-patient-form">+ Add New Patient</button>
+
+          <div id="new-patient-form" class="border rounded p-2 mt-2 d-none bg-light patient-form-box">
+            <div class="row g-2">
+              <div class="col-md-3">
+                <label class="form-label">Title</label>
+                <select id="p-title" class="form-select">
+                  <option value="">Select</option>
+                  <option value="Mr">Mr</option>
+                  <option value="Mrs">Mrs</option>
+                  <option value="Ms">Ms</option>
+                  <option value="Miss">Miss</option>
+                  <option value="Dr">Dr</option>
+                  <option value="Master">Master</option>
+                  <option value="Baby">Baby</option>
+                  <option value="Justice">Justice</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div class="col-md-9"><label class="form-label">Patient Full Name *</label><input id="p-full-name" class="form-control" placeholder="Enter full name"></div>
+              <div class="col-md-6"><label class="form-label">Labmate PID</label><input id="p-labmate-pid" class="form-control" placeholder="Enter Labmate PID"></div>
+              <div class="col-md-6 tb-panel-wrap"><label class="form-label">Panel Company</label><input id="p-panel-company" class="form-control" placeholder="Enter Panel Company"></div>
+              <div class="col-12">
+                <label class="form-label mb-1">Patient Tags</label>
+                <div id="patient-tag-picker" class="patient-tag-picker">
+                  <button type="button" class="patient-tag-chip" data-tag="VIP">VIP</button>
+                  <button type="button" class="patient-tag-chip" data-tag="High Value">High Value</button>
+                  <button type="button" class="patient-tag-chip" data-tag="Urgent">Urgent</button>
+                </div>
+              </div>
+              <div class="col-md-6"><label class="form-label">Gender *</label><select id="p-gender" class="form-select"><option>Male</option><option>Female</option><option>Other</option></select></div>
+              <div class="col-md-6"><label class="form-label">DOB</label><input type="date" id="p-dob" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">Age Years</label><input type="number" id="p-age-years" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">Contact No *</label><input id="p-contact-mobile" class="form-control" placeholder="Primary mobile"></div>
+              <div class="col-md-6"><label class="form-label">Alternative No</label><input id="p-alternate-mobile" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">Email</label><input id="p-email" type="email" class="form-control"></div>
+            </div>
+            <div class="text-end mt-2">
+              <button class="btn btn-success btn-sm" id="btn-save-patient">Save Patient</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="border rounded p-3 h-100">
+          <h6>Addresses Tagged</h6>
+          <div id="address-list" class="mb-2"></div>
+          <button class="btn btn-outline-primary btn-sm action-pill-btn" id="btn-show-address-form">+ Add New Address</button>
+
+          <div id="new-address-form" class="border rounded p-2 mt-2 d-none bg-light address-form-box">
+            <div class="row g-2">
+              <div class="col-md-6"><label class="form-label">Type</label><select id="a-type" class="form-select"><option>Home</option><option>Office</option><option>Temporary</option><option>Other</option></select></div>
+              <div class="col-md-6"><label class="form-label">House/Flat No *</label><input id="a-house" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">Floor</label><input id="a-floor" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">City *</label><select id="a-city" class="form-select"><option value="">Select City</option><option>Delhi</option><option>Faridabad</option><option>Gurgaon</option><option>Noida</option><option>Uttar Pradesh</option></select></div>
+              <div class="col-md-6"><label class="form-label">Colony *</label><select id="a-colony" class="form-select"></select></div>
+              <div class="col-md-6"><label class="form-label">Pincode</label><input id="a-pincode" class="form-control" readonly></div>
+              <div class="col-md-6"><label class="form-label">Route</label><input id="a-route" class="form-control" readonly></div>
+              <div class="col-12"><label class="form-label">Street / Landmark</label><input id="a-street" class="form-control"></div>
+              <div class="col-12"><label class="form-label">Access Notes</label><textarea id="a-access" class="form-control"></textarea></div>
+            </div>
+            <div class="text-end mt-2">
+              <button class="btn btn-success btn-sm" id="btn-save-address">Save Address</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-end mt-3">
+      <button class="btn btn-primary next-btn" id="btn-go-step2">Next <span class="next-arrow">&#8594;</span></button>
+    </div>
+  </div>
+</div>
+
