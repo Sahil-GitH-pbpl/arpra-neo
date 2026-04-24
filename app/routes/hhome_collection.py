@@ -9,8 +9,12 @@ service = HHomeCollectionCore()
 
 @hhome_collection_bp.get("/hhome-collection")
 def wizard():
-    service.clear_booking_session(session)
-    session.pop("search_mobile", None)
+    is_modify_mode = (request.args.get("mode") or "").strip().lower() == "modify"
+    has_modify_ctx = bool(session.get("hmodify_context"))
+    if not (is_modify_mode and has_modify_ctx):
+        service.clear_booking_session(session)
+        session.pop("search_mobile", None)
+        session.pop("hmodify_context", None)
     return render_template("hhome_collection/hwizard.html")
 
 
@@ -40,7 +44,8 @@ def search_caller():
         session["hcaller_id"] = caller["id"]
         selected = session.get("hselected_patients", [])
         linked_patients = service.get_linked_patients(caller["id"], session)
-        selected_enriched = service.get_selected_patients_enriched(caller["id"], selected)
+        reference_addresses = service.get_reference_addresses_for_caller(caller["id"])
+        selected_enriched = service.get_selected_patients_enriched(caller["id"], selected, session=session)
         addresses = service.get_addresses_for_caller(caller["id"])
         return jsonify(
             {
@@ -48,6 +53,7 @@ def search_caller():
                 "found": True,
                 "caller": caller,
                 "linked_patients": linked_patients,
+                "reference_addresses": reference_addresses,
                 "selected_patients": selected_enriched,
                 "addresses": addresses,
                 "selected_address_id": session.get("hselected_address_id"),
@@ -62,6 +68,7 @@ def search_caller():
             "found": False,
             "mobile": mobile,
             "linked_patients": [],
+            "reference_addresses": [],
             "selected_patients": [],
             "addresses": [],
             "selected_address_id": None,
@@ -73,8 +80,14 @@ def search_caller():
 def linked_patients():
     caller_id = session.get("hcaller_id")
     if not caller_id:
-        return jsonify({"ok": True, "patients": []})
-    return jsonify({"ok": True, "patients": service.get_linked_patients(caller_id, session)})
+        return jsonify({"ok": True, "patients": [], "reference_addresses": []})
+    return jsonify(
+        {
+            "ok": True,
+            "patients": service.get_linked_patients(caller_id, session),
+            "reference_addresses": service.get_reference_addresses_for_caller(caller_id),
+        }
+    )
 
 
 @hhome_collection_bp.get("/hhome-collection/current-caller")
@@ -115,8 +128,32 @@ def remove_selected_patient():
 def selected_patients():
     caller_id = session.get("hcaller_id")
     selected = session.get("hselected_patients", [])
-    enriched = service.get_selected_patients_enriched(caller_id, selected)
+    enriched = service.get_selected_patients_enriched(caller_id, selected, session=session)
     return jsonify({"ok": True, "selected_patients": enriched})
+
+
+@hhome_collection_bp.post("/hhome-collection/patient/<int:patient_id>/prescriptions")
+def upload_prescriptions(patient_id: int):
+    caller_id = session.get("hcaller_id")
+    if not caller_id:
+        return jsonify({"ok": False, "message": "Caller is required first"}), 400
+
+    uploaded = request.files.getlist("files") or request.files.getlist("prescription[]") or []
+    if not uploaded:
+        return jsonify({"ok": False, "message": "No files uploaded"}), 400
+
+    result = service.stage_patient_prescription_files(
+        session,
+        caller_id=caller_id,
+        patient_id=patient_id,
+        uploaded_files=uploaded,
+        actor_user_id=session.get("user_id"),
+    )
+    if result.get("ok"):
+        selected = session.get("hselected_patients", [])
+        result["selected_patients"] = service.get_selected_patients_enriched(caller_id, selected, session=session)
+    status = 200 if result.get("ok") else 400
+    return jsonify(result), status
 
 
 @hhome_collection_bp.post("/hhome-collection/create-patient")
@@ -126,7 +163,12 @@ def create_patient():
         session.pop("hcaller_id", None)
         caller_id = None
 
-    payload = request.get_json(silent=True) or {}
+    if request.files or request.form:
+        payload = request.form.to_dict()
+        uploaded_documents = request.files.getlist("patient_documents")
+    else:
+        payload = request.get_json(silent=True) or {}
+        uploaded_documents = []
     if not caller_id:
         contact_mobile = (payload.get("contact_mobile") or payload.get("searched_mobile") or "").strip()
         if not contact_mobile:
@@ -148,7 +190,11 @@ def create_patient():
         session["hcaller_id"] = caller_id
 
     result = service.create_patient_and_link(
-        caller_id, payload, session, actor_user_id=session.get("user_id")
+        caller_id,
+        payload,
+        session,
+        actor_user_id=session.get("user_id"),
+        uploaded_documents=uploaded_documents,
     )
     if result.get("ok"):
         result.update(service.get_step1_bundle(caller_id, session))
@@ -172,9 +218,18 @@ def update_patient(patient_id: int):
     caller_id = session.get("hcaller_id")
     if not caller_id:
         return jsonify({"ok": False, "message": "Caller is required first"}), 400
-    payload = request.get_json(silent=True) or {}
+    if request.files or request.form:
+        payload = request.form.to_dict()
+        uploaded_documents = request.files.getlist("patient_documents")
+    else:
+        payload = request.get_json(silent=True) or {}
+        uploaded_documents = []
     result = service.update_patient_for_caller(
-        caller_id, patient_id, payload, actor_user_id=session.get("user_id")
+        caller_id,
+        patient_id,
+        payload,
+        actor_user_id=session.get("user_id"),
+        uploaded_documents=uploaded_documents,
     )
     if result.get("ok"):
         result.update(service.get_step1_bundle(caller_id, session))
@@ -196,6 +251,17 @@ def addresses():
         "ok": True,
         "addresses": service.get_addresses_for_caller(caller_id),
         "selected_address_id": session.get("hselected_address_id"),
+    })
+
+
+@hhome_collection_bp.get("/hhome-collection/reference-addresses")
+def reference_addresses():
+    caller_id = session.get("hcaller_id")
+    if not caller_id:
+        return jsonify({"ok": True, "reference_addresses": []})
+    return jsonify({
+        "ok": True,
+        "reference_addresses": service.get_reference_addresses_for_caller(caller_id),
     })
 
 
@@ -249,6 +315,23 @@ def update_address(address_id: int):
     return jsonify(result), status
 
 
+@hhome_collection_bp.post("/hhome-collection/reference-address/<int:reference_address_id>/finalize")
+def finalize_reference_address(reference_address_id: int):
+    caller_id = session.get("hcaller_id")
+    if not caller_id:
+        return jsonify({"ok": False, "message": "Caller is required first"}), 400
+
+    result = service.finalize_reference_address_for_caller(
+        caller_id,
+        reference_address_id,
+        actor_user_id=session.get("user_id"),
+    )
+    if result.get("ok"):
+        result.update(service.get_step1_bundle(caller_id, session))
+    status = 200 if result.get("ok") else 400
+    return jsonify(result), status
+
+
 @hhome_collection_bp.post("/hhome-collection/select-address")
 def select_address():
     payload = request.get_json(silent=True) or {}
@@ -270,7 +353,7 @@ def summary():
 
     caller = service.get_caller(caller_id)
     selected = session.get("hselected_patients", [])
-    selected_enriched = service.get_selected_patients_enriched(caller_id, selected)
+    selected_enriched = service.get_selected_patients_enriched(caller_id, selected, session=session)
     address = session.get("hselected_address_snapshot")
     return jsonify({"ok": True, "caller": caller, "selected_patients": selected_enriched, "selected_address": address})
 
@@ -349,6 +432,19 @@ def panel_tests():
         return jsonify({"ok": False, "message": str(exc)}), 500
 
 
+@hhome_collection_bp.get("/hhome-collection/panel-test-search")
+def panel_test_search():
+    try:
+        comp_cat_id = request.args.get("comp_cat_id")
+        query = (request.args.get("q") or "").strip()
+        limit = request.args.get("limit", default=50, type=int)
+        if not comp_cat_id or len(query) < 2:
+            return jsonify({"ok": True, "tests": []})
+        return jsonify({"ok": True, "tests": service.search_panel_tests(comp_cat_id, query, limit=limit)})
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
 @hhome_collection_bp.get("/hhome-collection/panel-child-tests")
 def panel_child_tests():
     try:
@@ -371,6 +467,73 @@ def test_specimen_catalog():
         return jsonify({"ok": False, "message": str(exc)}), 500
 
 
+@hhome_collection_bp.get("/hhome-collection/modify-context")
+def modify_context():
+    ctx = session.get("hmodify_context") or {}
+    if not ctx:
+        return jsonify({"ok": True, "active": False})
+    return jsonify({"ok": True, "active": True, "context": ctx})
+
+
+@hhome_collection_bp.post("/hhome-collection/modify-booking")
+def modify_booking():
+    ctx = session.get("hmodify_context") or {}
+    booking_id = int(ctx.get("booking_id") or 0)
+    if booking_id <= 0:
+        return jsonify({"ok": False, "message": "Modify session not found"}), 400
+
+    caller_id = session.get("hcaller_id")
+    selected_patients = session.get("hselected_patients", [])
+    selected_address_id = session.get("hselected_address_id")
+    selected_snapshot = session.get("hselected_address_snapshot")
+
+    payload = request.get_json(silent=True) or {}
+    payload["modify_reason_text"] = (ctx.get("reason_text") or "").strip()
+    payload["_session_ref"] = session
+
+    flow_type = (ctx.get("flow_type") or "").strip().lower()
+    if flow_type == "followup_appointment":
+        payload["followup_reason_text"] = (ctx.get("reason_text") or "").strip()
+        result = service.create_followup_appointment(
+            booking_id=booking_id,
+            caller_id=caller_id,
+            selected_patients=selected_patients,
+            selected_address_id=selected_address_id,
+            selected_snapshot=selected_snapshot,
+            payload=payload,
+            actor_user_id=session.get("user_id"),
+        )
+    elif flow_type == "modify_appointment":
+        result = service.modify_appointment(
+            booking_id=booking_id,
+            appointment_id=int(ctx.get("appointment_id") or 0),
+            caller_id=caller_id,
+            selected_patients=selected_patients,
+            selected_address_id=selected_address_id,
+            selected_snapshot=selected_snapshot,
+            payload=payload,
+            actor_user_id=session.get("user_id"),
+        )
+    else:
+        result = service.modify_booking(
+            booking_id=booking_id,
+            caller_id=caller_id,
+            selected_patients=selected_patients,
+            selected_address_id=selected_address_id,
+            selected_snapshot=selected_snapshot,
+            payload=payload,
+            actor_user_id=session.get("user_id"),
+        )
+
+    if result.get("ok"):
+        session["last_booking_id"] = booking_id
+        service.clear_booking_session(session)
+        session.pop("hmodify_context", None)
+
+    status = 200 if result.get("ok") else 400
+    return jsonify(result), status
+
+
 @hhome_collection_bp.post("/hhome-collection/confirm-booking")
 def confirm_booking():
     caller_id = session.get("hcaller_id")
@@ -379,6 +542,7 @@ def confirm_booking():
     selected_snapshot = session.get("hselected_address_snapshot")
 
     payload = request.get_json(silent=True) or {}
+    payload["_session_ref"] = session
     result = service.confirm_booking(
         caller_id=caller_id,
         selected_patients=selected_patients,
@@ -391,6 +555,7 @@ def confirm_booking():
     if result["ok"]:
         session["last_booking_id"] = result["booking_id"]
         service.clear_booking_session(session)
+        session.pop("hmodify_context", None)
     status = 200 if result["ok"] else 400
     return jsonify(result), status
 

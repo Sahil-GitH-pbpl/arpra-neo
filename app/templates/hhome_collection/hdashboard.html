@@ -54,8 +54,53 @@
     </div>
   </div></div>
 </div>
+
+<div class="modal fade" id="cancelReasonModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Cancel Booking</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <label class="form-label">Select cancel reason *</label>
+        <select id="cancel-reason-select" class="form-select" required>
+          <option value="">Select reason</option>
+          <option value="Patient not at home">Patient not at home</option>
+          <option value="Office side cancellation">Office side cancellation</option>
+        </select>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-danger btn-sm" id="btn-confirm-cancel-reason">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="modifyReasonModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Modify Booking</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <label class="form-label">Modify reason / notes *</label>
+        <textarea id="modify-reason-text" class="form-control" rows="3" placeholder="Type reason" required></textarea>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-open-modify-flow">Next</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="{{ url_for('static', filename='js/hassign_user_picker.js') }}"></script>
 <script src="{{ url_for('static', filename='js/hdashboard.js') }}"></script>
 {% endblock %}
+
+

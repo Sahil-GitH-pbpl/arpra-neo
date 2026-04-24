@@ -1,7 +1,11 @@
+import json
+import os
+import shutil
 import uuid
 from datetime import date
 import re
 from threading import Lock
+from pathlib import Path
 
 from app.db.connection import get_bhasin7001_connection, get_db_connection
 from app.home_collection_core.hcodegen import hage_label, hcalculate_age_parts, hcode_from_id, hto_json
@@ -20,10 +24,325 @@ class HHomeCollectionCore:
             "groups_by_comp": {},
             "subgroups_by_comp_g": {},
             "tests_by_comp_g_s": {},
+            "tests_search_by_comp": {},
             "profile_children_map": {},
             "test_by_testcode1": {},
             "test_by_g_s_testcode": {},
         }
+        self.WHATSAPP_ENABLED = False
+
+    def _prescription_root(self) -> Path:
+        return Path(__file__).resolve().parents[2] / "app" / "static" / "uploads" / "prescriptions"
+
+    def _patient_document_root(self) -> Path:
+        return Path(__file__).resolve().parents[2] / "app" / "static" / "uploads" / "patient_documents"
+
+    def _prescription_stage_file(self, session) -> Path | None:
+        token = (session or {}).get("hprescription_stage_token") if session else None
+        if not token:
+            return None
+        return self._prescription_root() / "_stage" / f"{token}.json"
+
+    def _load_stage_map(self, session) -> dict:
+        stage_file = self._prescription_stage_file(session)
+        if not stage_file or not stage_file.exists():
+            return {}
+        try:
+            return json.loads(stage_file.read_text(encoding="utf-8") or "{}")
+        except Exception:
+            return {}
+
+    def _save_stage_map(self, session, data: dict):
+        stage_file = self._prescription_stage_file(session)
+        if not stage_file:
+            return
+        stage_file.parent.mkdir(parents=True, exist_ok=True)
+        stage_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def _clear_stage_map(self, session):
+        stage_file = self._prescription_stage_file(session)
+        if stage_file and stage_file.exists():
+            try:
+                stage_file.unlink()
+            except Exception:
+                pass
+        if stage_file:
+            try:
+                stage_dir = stage_file.parent
+                if stage_dir.exists() and stage_dir.is_dir():
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+            except Exception:
+                pass
+        if session is not None:
+            session.pop("hprescription_stage_token", None)
+
+    def _ensure_stage_token(self, session):
+        if session is None:
+            return None
+        token = (session.get("hprescription_stage_token") or "").strip()
+        if not token:
+            token = uuid.uuid4().hex
+            session["hprescription_stage_token"] = token
+        return token
+
+    def _split_prescription_files(self, value) -> list:
+        text = self._norm_code(value)
+        if not text:
+            return []
+        return [x.strip() for x in text.split(",") if x.strip()]
+
+    def _split_patient_documents(self, value) -> list:
+        text = self._norm_code(value)
+        if not text:
+            return []
+        return [x.strip() for x in text.split(",") if x.strip()]
+
+    def get_patient_prescription_files(self, patient_id: int):
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT prescription_files FROM hpatient_master WHERE id=%s", (patient_id,))
+                row = cur.fetchone()
+                return self._split_prescription_files((row or {}).get("prescription_files"))
+        finally:
+            conn.close()
+
+    def patient_belongs_to_caller(self, caller_id: int, patient_id: int) -> bool:
+        if not caller_id or not patient_id:
+            return False
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM hcaller_patient_link
+                    WHERE caller_id=%s AND patient_id=%s AND is_active=1
+                    LIMIT 1
+                    """,
+                    (caller_id, patient_id),
+                )
+                return bool(cur.fetchone())
+        finally:
+            conn.close()
+
+    def append_patient_prescription_files(self, patient_id: int, new_files: list[str], actor_user_id=None):
+        actor = self._actor(actor_user_id)
+        files = [f for f in new_files if self._norm_code(f)]
+        if not files:
+            return {"ok": True, "files": []}
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT prescription_files FROM hpatient_master WHERE id=%s", (patient_id,))
+                row = cur.fetchone()
+                existing = self._split_prescription_files((row or {}).get("prescription_files"))
+                merged = existing[:]
+                for f in files:
+                    if f not in merged:
+                        merged.append(f)
+                cur.execute(
+                    "UPDATE hpatient_master SET prescription_files=%s, updated_by=%s WHERE id=%s",
+                    (",".join(merged) or None, actor, patient_id),
+                )
+                conn.commit()
+                return {"ok": True, "files": merged}
+        except Exception as exc:
+            conn.rollback()
+            return {"ok": False, "message": str(exc)}
+        finally:
+            conn.close()
+
+    def get_patient_document_files(self, patient_id: int):
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT patient_documents FROM hpatient_master WHERE id=%s", (patient_id,))
+                row = cur.fetchone()
+                return self._split_patient_documents((row or {}).get("patient_documents"))
+        finally:
+            conn.close()
+
+    def _save_patient_documents_with_cursor(self, cur, patient_id: int, uploaded_files: list, actor_user_id=None):
+        actor = self._actor(actor_user_id)
+        files = [f for f in (uploaded_files or []) if f and getattr(f, "filename", "")]
+        if not files:
+            return {"ok": True, "files": []}
+
+        allowed_exts = {".pdf", ".jpg", ".jpeg", ".png"}
+        for file_obj in files:
+            orig_name = getattr(file_obj, "filename", "") or ""
+            ext = Path(orig_name).suffix.lower()
+            if ext not in allowed_exts:
+                return {"ok": False, "message": "Only PDF, JPG, JPEG, PNG files are allowed"}
+
+        cur.execute("SELECT patient_documents FROM hpatient_master WHERE id=%s", (patient_id,))
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "message": "Patient not found"}
+
+        existing = self._split_patient_documents(row.get("patient_documents"))
+        if len(existing) + len(files) > 5:
+            return {"ok": False, "message": "Maximum 5 patient documents per patient allowed"}
+
+        folder_name = f"PT{int(patient_id)}"
+        final_dir = self._patient_document_root() / folder_name
+        final_dir.mkdir(parents=True, exist_ok=True)
+
+        saved = []
+        seq = len(existing) + 1
+        for file_obj in files:
+            ext = Path(getattr(file_obj, "filename", "") or "").suffix.lower()
+            final_name = f"PT{int(patient_id)}_DOC_{seq}{ext}"
+            final_rel = f"{folder_name}/{final_name}"
+            file_obj.save(final_dir / final_name)
+            saved.append(final_rel)
+            seq += 1
+
+        merged = existing + saved
+        cur.execute(
+            "UPDATE hpatient_master SET patient_documents=%s, updated_by=%s WHERE id=%s",
+            (",".join(merged) or None, actor, patient_id),
+        )
+        return {"ok": True, "files": merged, "saved": saved}
+
+    def append_patient_document_files(self, patient_id: int, uploaded_files: list, actor_user_id=None):
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                result = self._save_patient_documents_with_cursor(
+                    cur, patient_id, uploaded_files, actor_user_id=actor_user_id
+                )
+                if not result.get("ok"):
+                    conn.rollback()
+                    return result
+                conn.commit()
+                return result
+        except Exception as exc:
+            conn.rollback()
+            return {"ok": False, "message": str(exc)}
+        finally:
+            conn.close()
+
+    def stage_patient_prescription_files(self, session, caller_id: int, patient_id: int, uploaded_files: list, actor_user_id=None):
+        token = self._ensure_stage_token(session)
+        if not token:
+            return {"ok": False, "message": "Session token missing"}
+        if not self.patient_belongs_to_caller(caller_id, patient_id):
+            return {"ok": False, "message": "Patient not linked with selected caller"}
+
+        files = [f for f in (uploaded_files or []) if f]
+        if not files:
+            return {"ok": False, "message": "No files uploaded"}
+
+        stage_map = self._load_stage_map(session)
+        staged = []
+        for item in stage_map.get(str(int(patient_id)), []) or []:
+            rel = self._norm_code(item.get("rel_name"))
+            if rel:
+                staged.append(rel)
+
+        if len(staged) + len(files) > 4:
+            return {"ok": False, "message": "Maximum 4 prescriptions per patient allowed"}
+
+        root = self._prescription_root()
+        stage_dir = root / "_stage" / token / f"patient_{int(patient_id)}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        current_items = stage_map.get(str(int(patient_id)), []) or []
+        seq = len(staged) + 1
+        allowed_exts = {".pdf", ".jpg", ".jpeg", ".png"}
+        saved = []
+        for file_obj in files:
+            orig_name = getattr(file_obj, "filename", "") or ""
+            ext = Path(orig_name).suffix.lower()
+            if ext not in allowed_exts:
+                return {"ok": False, "message": "Only PDF, JPG, JPEG, PNG files are allowed"}
+            tmp_name = f"{uuid.uuid4().hex}{ext}"
+            tmp_path = stage_dir / tmp_name
+            file_obj.save(tmp_path)
+            rel_name = f"staged/{token}/patient_{int(patient_id)}/{tmp_name}"
+            current_items.append({
+                "tmp_path": str(tmp_path),
+                "ext": ext,
+                "rel_name": rel_name,
+                "seq": seq,
+                "orig_name": orig_name,
+            })
+            saved.append(rel_name)
+            seq += 1
+
+        stage_map[str(int(patient_id))] = current_items
+        self._save_stage_map(session, stage_map)
+        return {"ok": True, "files": saved, "count": len(staged) + len(files)}
+
+    def get_patient_prescription_files_with_stage(self, patient_id: int, session=None):
+        db_files = self.get_patient_prescription_files(patient_id)
+        if not session:
+            return db_files
+        stage_map = self._load_stage_map(session)
+        staged = []
+        for item in stage_map.get(str(int(patient_id)), []) or []:
+            rel = self._norm_code(item.get("rel_name"))
+            if rel:
+                staged.append(rel)
+        merged = []
+        for item in db_files + staged:
+            if item and item not in merged:
+                merged.append(item)
+        return merged
+
+    def get_patient_prescription_display_files_with_stage(self, patient_id: int, session=None):
+        db_files = self.get_patient_prescription_files(patient_id)
+        labels = [self._norm_code(f).split("/")[-1] for f in db_files if self._norm_code(f)]
+        if not session:
+            return labels
+        stage_map = self._load_stage_map(session)
+        for item in stage_map.get(str(int(patient_id)), []) or []:
+            label = self._norm_code(item.get("orig_name"))
+            if not label:
+                label = self._norm_code(item.get("rel_name")).split("/")[-1]
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def merge_staged_prescriptions(self, session, booking_code: str, booking_id: int, actor_user_id=None):
+        stage_map = self._load_stage_map(session)
+        if not stage_map:
+            return {"ok": True, "moved": 0}
+
+        root = self._prescription_root()
+        moved = 0
+        try:
+            for pid_str, items in stage_map.items():
+                pid = int(pid_str or 0)
+                if pid <= 0:
+                    continue
+                final_dir = root / booking_code
+                final_dir.mkdir(parents=True, exist_ok=True)
+                final_names = []
+                seq = 1
+                for item in items or []:
+                    src = item.get("tmp_path")
+                    ext = self._norm_code(item.get("ext")).lower()
+                    if not src or not os.path.exists(src):
+                        continue
+                    final_name = f"{booking_code}_PT{pid}_{seq}{ext}"
+                    final_rel = f"{booking_code}/{final_name}"
+                    final_path = final_dir / final_name
+                    shutil.move(src, final_path)
+                    final_names.append(final_rel)
+                    seq += 1
+                    moved += 1
+                if final_names:
+                    res = self.append_patient_prescription_files(pid, final_names, actor_user_id=actor_user_id)
+                    if not res.get("ok"):
+                        return res
+            self._clear_stage_map(session)
+            return {"ok": True, "moved": moved}
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
 
     def _norm_code(self, v) -> str:
         if v is None:
@@ -40,6 +359,101 @@ class HHomeCollectionCore:
                 keep.append(ch)
         ordered = [x for x in ("C", "P", "F") if x in keep]
         return "".join(ordered)
+
+    def _selected_charge_mode(self, billing: dict) -> str:
+        if not isinstance(billing, dict):
+            return ""
+        mode = self._normalize_charge_mode(
+            billing.get("selected_charge_mode")
+            or billing.get("charge_mode_code")
+            or billing.get("charge_mode")
+        )
+        if len(mode) > 1:
+            return mode[0]
+        return mode
+
+    def _test_status(self, v) -> str:
+        raw = self._norm_code(v).upper()
+        allowed = {"PENDING", "COMPLETED", "DROPPED", "CANCELLED"}
+        return raw if raw in allowed else "PENDING"
+
+    def _table_exists(self, cur, table_name: str) -> bool:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE() AND table_name = %s
+            LIMIT 1
+            """,
+            (table_name,),
+        )
+        return bool(cur.fetchone())
+
+    def _recalculate_followup_required(self, cur, booking_id: int):
+        cur.execute(
+            """
+            SELECT COUNT(*) AS pending_count
+            FROM hhome_collection_booking_patient_test
+            WHERE booking_id=%s
+              AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+            """,
+            (booking_id,),
+        )
+        pending_count = int((cur.fetchone() or {}).get("pending_count") or 0)
+        return pending_count
+
+    def _next_appointment_no(self, cur, booking_id: int) -> int:
+        cur.execute(
+            "SELECT COALESCE(MAX(appointment_no), 0) AS max_no FROM hhome_collection_booking_appointment WHERE booking_id=%s",
+            (booking_id,),
+        )
+        max_no = int((cur.fetchone() or {}).get("max_no") or 0)
+        return max_no + 1
+
+    def _patient_ids_to_json(self, patient_ids: list[int]) -> str:
+        cleaned = sorted({int(x) for x in (patient_ids or []) if int(x or 0) > 0})
+        return hto_json(cleaned)
+
+    def _patient_ids_from_json(self, raw) -> list[int]:
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        return sorted({int(x) for x in data if int(x or 0) > 0})
+
+    def _patient_panel_sections(self, patient_meta: dict) -> list:
+        if not isinstance(patient_meta, dict):
+            return []
+        panels = patient_meta.get("panels")
+        if isinstance(panels, list):
+            return [p for p in panels if isinstance(p, dict)]
+        return [
+            {
+                "panel": patient_meta.get("panel") or {},
+                "billing": patient_meta.get("billing") or {},
+                "selected_tests": patient_meta.get("selected_tests") or [],
+            }
+        ]
+
+    def _validate_patient_test_duplicates(self, pid: int, panel_sections: list):
+        seen = {}
+        for section in panel_sections:
+            panel_name = self._norm_code((section.get("panel") or {}).get("pname"))
+            for t in section.get("selected_tests") or []:
+                booked_code = self._norm_code(t.get("booked_code"))
+                if not booked_code:
+                    continue
+                if booked_code in seen:
+                    return {
+                        "ok": False,
+                        "message": f"Test {booked_code} already selected for patient {pid} in {seen[booked_code] or 'another panel'}",
+                    }
+                seen[booked_code] = panel_name
+        return {"ok": True}
 
     def _normalize_wa_target(self, phone: str) -> str:
         digits = re.sub(r"\D", "", str(phone or ""))
@@ -201,6 +615,7 @@ class HHomeCollectionCore:
             groups_by_comp = {}
             subgroups_by_comp_g = {}
             tests_by_comp_g_s = {}
+            tests_search_by_comp = {}
             profile_children_map = {}
             seen_tests = set()
 
@@ -239,6 +654,27 @@ class HHomeCollectionCore:
                 if t_key in seen_tests:
                     continue
                 seen_tests.add(t_key)
+
+                group_desc = self._norm_code(group_name.get(g, ""))
+                subgroup_desc = self._norm_code(subgroup_name.get((g, s), ""))
+                has_children = bool(profile_children_map.get((g, s, self._norm_code(test_code))))
+                search_item = {
+                    "gcode": g,
+                    "scode": s,
+                    "test_code": test_code,
+                    "testcode1": testcode1,
+                    "booked_code": booked_code,
+                    "description": description,
+                    "description_lc": description.lower(),
+                    "group_description": group_desc,
+                    "subgroup_description": subgroup_desc,
+                    "charge": r.get("Charge"),
+                    "mrp": r.get("MRP"),
+                    "max_discount": r.get("MaxDiscount"),
+                    "is_profile": bool((meta or {}).get("is_profile")),
+                    "has_children": has_children,
+                }
+                tests_search_by_comp.setdefault(cc, []).append(search_item)
 
                 tests_by_comp_g_s.setdefault((cc, g, s), []).append(
                     {
@@ -316,6 +752,7 @@ class HHomeCollectionCore:
                 "groups_by_comp": groups_by_comp,
                 "subgroups_by_comp_g": subgroups_by_comp_g,
                 "tests_by_comp_g_s": tests_by_comp_g_s,
+                "tests_search_by_comp": tests_search_by_comp,
                 "profile_children_map": profile_children_map,
                 "test_by_testcode1": test_by_code1,
                 "test_by_g_s_testcode": test_by_gst,
@@ -349,17 +786,60 @@ class HHomeCollectionCore:
             digits = digits[-10:]
         return digits
 
+    def _as_bool_flag(self, value) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = self._norm_code(value).lower()
+        return text in ("1", "true", "yes", "on", "y")
+
+    def _normalize_floor_value(self, floor_value, full_house_flag=False):
+        if full_house_flag:
+            return "Full House"
+
+        text = self._norm_code(floor_value)
+        if not text:
+            return ""
+        if not re.fullmatch(r"\d{1,2}", text):
+            return ""
+        num = int(text)
+        if num < 1 or num > 99:
+            return ""
+        return str(num)
+
+    def _compose_street_line(self, block_tower_no=None, street_sector=None) -> str:
+        return self._norm_code(street_sector)
+
+    def _street_sector_from_street_line(self, value) -> str:
+        street = self._norm_code(value)
+        return re.sub(r"^street\s*/\s*sector\s*:\s*", "", street, flags=re.IGNORECASE).strip()
+
+    def _normalize_block_tower_no(self, value) -> str:
+        return self._norm_code(value)
+
+    def _enrich_address_row(self, row):
+        if not row:
+            return None
+        enriched = dict(row)
+        floor = self._norm_code(enriched.get("floor"))
+        enriched["is_full_house"] = floor.lower() == "full house"
+        enriched["floor_display"] = floor
+        enriched["block_tower_no"] = self._normalize_block_tower_no(enriched.get("block_tower_no"))
+        enriched["street_sector"] = self._street_sector_from_street_line(enriched.get("street_line"))
+        return enriched
+
     def reset_session_for_new_caller(self, session):
         session.pop("hcaller_id", None)
         session["hselected_patients"] = []
         session["hselected_address_id"] = None
         session["hselected_address_snapshot"] = None
+        self._clear_stage_map(session)
 
     def clear_booking_session(self, session):
         session.pop("hcaller_id", None)
         session.pop("hselected_patients", None)
         session.pop("hselected_address_id", None)
         session.pop("hselected_address_snapshot", None)
+        self._clear_stage_map(session)
 
     def _temp_code(self, prefix: str) -> str:
         return f"{prefix}{uuid.uuid4().hex[:12]}"
@@ -427,7 +907,12 @@ class HHomeCollectionCore:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, caller_code, full_name, primary_mobile FROM hcaller_master WHERE id=%s",
+                    """
+                    SELECT id, caller_code, full_name, primary_mobile, alternate_mobile,
+                           email, caller_status, created_at, created_by, updated_at, updated_by
+                    FROM hcaller_master
+                    WHERE id=%s
+                    """,
                     (caller_id,),
                 )
                 return cur.fetchone()
@@ -544,7 +1029,7 @@ class HHomeCollectionCore:
                     """
                     SELECT p.id, p.patient_code, CONCAT_WS(' ', p.title, p.full_name) AS full_name, p.tag, p.age_years, p.date_of_birth,
                            am.id AS default_address_id,
-                           CONCAT_WS(', ', am.house_flat_no, am.floor, am.colony_name_snapshot, am.pincode_snapshot) AS default_address
+                           CONCAT_WS(', ', am.house_flat_no, am.floor, am.colony_name, am.pincode) AS default_address
                     FROM hcaller_patient_link cpl
                     INNER JOIN hpatient_master p ON p.id = cpl.patient_id
                     LEFT JOIN hpatient_address_link pal ON pal.id = (
@@ -609,21 +1094,24 @@ class HHomeCollectionCore:
         finally:
             conn.close()
 
-    def create_patient_and_link(self, caller_id: int, payload: dict, session, actor_user_id=None):
+    def create_patient_and_link(self, caller_id: int, payload: dict, session, actor_user_id=None, uploaded_documents=None):
         actor = self._actor(actor_user_id)
         full_name_input = (payload.get("full_name") or "").strip()
         title = (payload.get("title") or "").strip() or None
         labmate_pid = (payload.get("labmate_pid") or "").strip() or None
         panel_company = (payload.get("panel_company") or "").strip() or None
+        card_number = (payload.get("card_number") or "").strip() or None
         gender = (payload.get("gender") or "").strip()
         if not full_name_input or not gender:
             return {"ok": False, "message": "Patient full name and gender are required"}
         full_name = full_name_input
         tag = self.sanitize_patient_tags(payload.get("tag"))
         dob = payload.get("date_of_birth") or None
-        age_years = payload.get("age_years")
+        age_years = payload.get("age_years") or None
         contact_mobile = self.normalize_mobile(payload.get("contact_mobile"))
         alternate_mobile = self.normalize_mobile(payload.get("alternate_mobile"))
+        if not contact_mobile:
+            return {"ok": False, "message": "Contact No is required"}
 
         if dob and not age_years:
             age_years, _ = hcalculate_age_parts(dob)
@@ -641,10 +1129,10 @@ class HHomeCollectionCore:
                 cur.execute(
                     """
                     INSERT INTO hpatient_master
-                    (patient_code, title, full_name, labmate_pid, panel_company, tag,
+                    (patient_code, title, full_name, labmate_pid, panel_company, card_number, tag,
                      gender, date_of_birth, age_years, contact_mobile, alternate_mobile,
                      patient_status, created_by, updated_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Active',%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Active',%s,%s)
                     """,
                     (
                         temp_code,
@@ -652,6 +1140,7 @@ class HHomeCollectionCore:
                         full_name,
                         labmate_pid,
                         panel_company,
+                        card_number,
                         tag or None,
                         gender,
                         dob,
@@ -665,6 +1154,13 @@ class HHomeCollectionCore:
                 patient_id = cur.lastrowid
                 patient_code = hcode_from_id("HPT-HC-", patient_id)
                 cur.execute("UPDATE hpatient_master SET patient_code=%s WHERE id=%s", (patient_code, patient_id))
+
+                document_result = self._save_patient_documents_with_cursor(
+                    cur, patient_id, uploaded_documents or [], actor_user_id=actor
+                )
+                if not document_result.get("ok"):
+                    conn.rollback()
+                    return document_result
 
                 self._upsert_caller_patient_link(cur, caller_id, patient_id, actor_user_id=actor)
                 conn.commit()
@@ -694,7 +1190,8 @@ class HHomeCollectionCore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT p.id, p.title, p.full_name, p.labmate_pid, p.panel_company, p.tag,
+                    SELECT p.id, p.title, p.full_name, p.labmate_pid, p.panel_company, p.card_number,
+                           p.patient_documents, p.tag,
                            p.gender, p.date_of_birth, p.age_years, p.contact_mobile, p.alternate_mobile,
                            cm.email
                     FROM hcaller_patient_link cpl
@@ -712,11 +1209,12 @@ class HHomeCollectionCore:
                     return None
                 if row.get("date_of_birth"):
                     row["date_of_birth"] = row["date_of_birth"].isoformat()
+                row["patient_documents"] = self._split_patient_documents(row.get("patient_documents"))
                 return row
         finally:
             conn.close()
 
-    def update_patient_for_caller(self, caller_id: int, patient_id: int, payload: dict, actor_user_id=None):
+    def update_patient_for_caller(self, caller_id: int, patient_id: int, payload: dict, actor_user_id=None, uploaded_documents=None):
         actor = self._actor(actor_user_id)
         full_name = (payload.get("full_name") or "").strip()
         gender = (payload.get("gender") or "").strip()
@@ -726,14 +1224,17 @@ class HHomeCollectionCore:
         title = (payload.get("title") or "").strip() or None
         labmate_pid = (payload.get("labmate_pid") or "").strip() or None
         panel_company = (payload.get("panel_company") or "").strip() or None
+        card_number = (payload.get("card_number") or "").strip() or None
         tag = self.sanitize_patient_tags(payload.get("tag"))
         dob = payload.get("date_of_birth") or None
-        age_years = payload.get("age_years")
+        age_years = payload.get("age_years") or None
         if dob and not age_years:
             age_years, _ = hcalculate_age_parts(dob)
 
         contact_mobile = self.normalize_mobile(payload.get("contact_mobile"))
         alternate_mobile = self.normalize_mobile(payload.get("alternate_mobile"))
+        if not contact_mobile:
+            return {"ok": False, "message": "Contact No is required"}
         email = (payload.get("email") or "").strip() or None
 
         conn = get_db_connection()
@@ -758,6 +1259,7 @@ class HHomeCollectionCore:
                         full_name=%s,
                         labmate_pid=%s,
                         panel_company=%s,
+                        card_number=%s,
                         tag=%s,
                         gender=%s,
                         date_of_birth=%s,
@@ -772,6 +1274,7 @@ class HHomeCollectionCore:
                         full_name,
                         labmate_pid,
                         panel_company,
+                        card_number,
                         tag or None,
                         gender,
                         dob,
@@ -796,6 +1299,13 @@ class HHomeCollectionCore:
                         (email, actor, caller_id),
                     )
 
+                document_result = self._save_patient_documents_with_cursor(
+                    cur, patient_id, uploaded_documents or [], actor_user_id=actor
+                )
+                if not document_result.get("ok"):
+                    conn.rollback()
+                    return document_result
+
                 conn.commit()
                 return {"ok": True}
         except Exception as exc:
@@ -804,7 +1314,7 @@ class HHomeCollectionCore:
         finally:
             conn.close()
 
-    def get_selected_patients_enriched(self, caller_id: int, selected: list):
+    def get_selected_patients_enriched(self, caller_id: int, selected: list, session=None):
         patient_ids = [int(item["patient_id"]) for item in selected]
         if not patient_ids:
             return []
@@ -813,13 +1323,21 @@ class HHomeCollectionCore:
         try:
             placeholders = ",".join(["%s"] * len(patient_ids))
             with conn.cursor() as cur:
+                caller_email = None
+                if caller_id:
+                    cur.execute("SELECT email FROM hcaller_master WHERE id=%s", (caller_id,))
+                    c_row = cur.fetchone() or {}
+                    caller_email = self._norm_code(c_row.get("email")) or None
                 cur.execute(
                     f"""
                     SELECT id, patient_code, title, full_name, gender, date_of_birth, age_years
+                         , labmate_pid
                          , panel_company
+                         , card_number
                          , tag
                          , contact_mobile
                          , alternate_mobile
+                         , patient_documents
                     FROM hpatient_master
                     WHERE id IN ({placeholders})
                     """,
@@ -833,6 +1351,7 @@ class HHomeCollectionCore:
                 if pid not in rows:
                     continue
                 r = rows[pid]
+                patient_documents = self._split_patient_documents(r.get("patient_documents"))
                 response.append(
                     {
                         "patient_id": pid,
@@ -840,10 +1359,15 @@ class HHomeCollectionCore:
                         "full_name": f"{(r.get('title') or '').strip()} {(r['full_name'] or '').strip()}".strip(),
                         "tag": r.get("tag"),
                         "panel_company": r.get("panel_company"),
+                        "card_number": r.get("card_number"),
                         "gender": r["gender"],
                         "date_of_birth": r.get("date_of_birth").isoformat() if r.get("date_of_birth") else None,
+                        "labmate_pid": r.get("labmate_pid") or None,
                         "contact_mobile": r.get("contact_mobile") or None,
                         "alternate_mobile": r.get("alternate_mobile") or None,
+                        "email": caller_email,
+                        "patient_documents": patient_documents,
+                        "patient_document_count": len(patient_documents),
                         "age": hage_label(r.get("age_years"), r.get("date_of_birth")),
                     }
                 )
@@ -858,12 +1382,14 @@ class HHomeCollectionCore:
                 "linked_patients": [],
                 "selected_patients": [],
                 "addresses": [],
+                "reference_addresses": [],
                 "selected_address_id": session.get("hselected_address_id"),
             }
         return {
-            "linked_patients": self.get_linked_patients(caller_id, session),
-            "selected_patients": self.get_selected_patients_enriched(caller_id, selected),
+                "linked_patients": self.get_linked_patients(caller_id, session),
+            "selected_patients": self.get_selected_patients_enriched(caller_id, selected, session=session),
             "addresses": self.get_addresses_for_caller(caller_id),
+            "reference_addresses": self.get_reference_addresses_for_caller(caller_id),
             "selected_address_id": session.get("hselected_address_id"),
         }
 
@@ -904,8 +1430,11 @@ class HHomeCollectionCore:
                 cur.execute(
                     """
                     SELECT DISTINCT am.id, am.address_type, am.house_flat_no,
-                           am.floor, am.street_line, am.landmark, am.colony_name_snapshot,
-                           am.pincode_snapshot, am.route_no_snapshot, am.city, am.access_notes
+                           am.floor, am.block_tower_no, am.street_line, am.landmark, am.colony_id,
+                           am.colony_name,
+                           am.pincode,
+                           am.route_no,
+                           am.google_location, am.city, am.access_notes
                     FROM hcaller_patient_link cpl
                     INNER JOIN hpatient_address_link pal ON pal.patient_id = cpl.patient_id AND pal.is_active = 1
                     INNER JOIN haddress_master am ON am.id = pal.address_id
@@ -914,7 +1443,60 @@ class HHomeCollectionCore:
                     """,
                     (caller_id,),
                 )
+                return [self._enrich_address_row(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def get_reference_addresses_for_caller(self, caller_id: int):
+        if not caller_id:
+            return []
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, caller_id, area, city, pincode, routename, address, status,
+                           removed_by, removed_at, created_at, created_by, updated_at, updated_by
+                    FROM hcaller_reference_address
+                    WHERE caller_id = %s AND status = 1
+                    ORDER BY id DESC
+                    """,
+                    (caller_id,),
+                )
                 return cur.fetchall()
+        finally:
+            conn.close()
+
+    def finalize_reference_address_for_caller(self, caller_id: int, reference_address_id: int, actor_user_id=None):
+        actor = self._actor(actor_user_id)
+        if not caller_id or not reference_address_id:
+            return {"ok": False, "message": "Invalid reference address"}
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE hcaller_reference_address
+                    SET status = 2,
+                        removed_by = %s,
+                        removed_at = NOW(),
+                        updated_by = %s
+                    WHERE id = %s
+                      AND caller_id = %s
+                      AND status = 1
+                    """,
+                    (actor, actor, reference_address_id, caller_id),
+                )
+                if cur.rowcount <= 0:
+                    conn.rollback()
+                    return {"ok": False, "message": "Reference address not found"}
+                conn.commit()
+                return {"ok": True}
+        except Exception as exc:
+            conn.rollback()
+            return {"ok": False, "message": str(exc)}
         finally:
             conn.close()
 
@@ -922,8 +1504,19 @@ class HHomeCollectionCore:
         actor = self._actor(actor_user_id)
         house_flat_no = (payload.get("house_flat_no") or "").strip()
         colony_id = int(payload.get("colony_id", 0))
-        if not house_flat_no or not colony_id:
-            return {"ok": False, "message": "House/Flat and colony are required"}
+        city = (payload.get("city") or "").strip()
+        is_full_house = self._as_bool_flag(payload.get("full_house"))
+        floor_value = self._normalize_floor_value(payload.get("floor"), is_full_house)
+        block_tower_no = self._normalize_block_tower_no(payload.get("block_tower_no"))
+        street_line = self._compose_street_line(None, payload.get("street_sector") or payload.get("street_line"))
+        if not house_flat_no:
+            return {"ok": False, "message": "House/Flat No is required"}
+        if not colony_id:
+            return {"ok": False, "message": "Colony is required"}
+        if not city:
+            return {"ok": False, "message": "City is required"}
+        if not floor_value:
+            return {"ok": False, "message": "Floor number 1-99 or Full House is required"}
 
         conn = get_db_connection()
         try:
@@ -935,28 +1528,29 @@ class HHomeCollectionCore:
                 colony = cur.fetchone()
                 if not colony:
                     return {"ok": False, "message": "Invalid colony"}
-                city = (payload.get("city") or "").strip()
-                if not city:
-                    return {"ok": False, "message": "City is required"}
+                if not self._norm_code(colony.get("pincode")) or not self._norm_code(colony.get("route_no")):
+                    return {"ok": False, "message": "Selected colony is missing pincode or route"}
 
                 cur.execute(
                     """
                     INSERT INTO haddress_master
-                    (address_type, house_flat_no, floor, street_line, landmark,
-                     colony_id, colony_name_snapshot, pincode_snapshot, route_no_snapshot, city,
+                    (address_type, house_flat_no, floor, block_tower_no, street_line, landmark,
+                     colony_id, colony_name, pincode, route_no, google_location, city,
                      access_notes, created_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         payload.get("address_type") or "Home",
                         house_flat_no,
-                        payload.get("floor") or None,
-                        payload.get("street_line") or None,
+                        floor_value or None,
+                        block_tower_no or None,
+                        street_line or None,
                         payload.get("landmark") or None,
                         colony_id,
                         colony["colony_name"],
                         colony["pincode"],
                         colony["route_no"],
+                        payload.get("google_location") or None,
                         city,
                         payload.get("access_notes") or None,
                         actor,
@@ -987,12 +1581,16 @@ class HHomeCollectionCore:
                     "address_id": address_id,
                     "address_type": payload.get("address_type") or "Home",
                     "house_flat_no": house_flat_no,
-                    "floor": payload.get("floor") or None,
-                    "street_line": payload.get("street_line") or None,
+                    "floor": floor_value or None,
+                    "is_full_house": is_full_house,
+                    "block_tower_no": block_tower_no or None,
+                    "street_line": street_line or None,
+                    "street_sector": self._street_sector_from_street_line(street_line) or None,
                     "landmark": payload.get("landmark") or None,
-                    "colony_name_snapshot": colony["colony_name"],
-                    "pincode_snapshot": colony["pincode"],
-                    "route_no_snapshot": colony["route_no"],
+                    "colony_name": colony["colony_name"],
+                    "pincode": colony["pincode"],
+                    "route_no": colony["route_no"],
+                    "google_location": payload.get("google_location") or None,
                     "city": city,
                     "access_notes": payload.get("access_notes") or None,
                 }
@@ -1010,14 +1608,17 @@ class HHomeCollectionCore:
                 cur.execute(
                     """
                     SELECT id AS address_id, address_type, house_flat_no, floor,
-                           street_line, landmark, colony_name_snapshot, pincode_snapshot,
-                           route_no_snapshot, city, access_notes
+                           block_tower_no, street_line, landmark,
+                           colony_name,
+                           pincode,
+                           route_no,
+                           google_location, city, access_notes
                     FROM haddress_master
                     WHERE id=%s
                     """,
                     (address_id,),
                 )
-                return cur.fetchone()
+                return self._enrich_address_row(cur.fetchone())
         finally:
             conn.close()
 
@@ -1028,8 +1629,11 @@ class HHomeCollectionCore:
                 cur.execute(
                     """
                     SELECT DISTINCT am.id, am.address_type, am.house_flat_no, am.floor,
-                           am.street_line, am.landmark, am.colony_id, am.colony_name_snapshot,
-                           am.pincode_snapshot, am.route_no_snapshot, am.city, am.access_notes
+                           am.block_tower_no, am.street_line, am.landmark, am.colony_id,
+                           am.colony_name,
+                           am.pincode,
+                           am.route_no,
+                           am.google_location, am.city, am.access_notes
                     FROM hcaller_patient_link cpl
                     INNER JOIN hpatient_address_link pal ON pal.patient_id = cpl.patient_id AND pal.is_active = 1
                     INNER JOIN haddress_master am ON am.id = pal.address_id
@@ -1040,7 +1644,7 @@ class HHomeCollectionCore:
                     """,
                     (caller_id, address_id),
                 )
-                return cur.fetchone()
+                return self._enrich_address_row(cur.fetchone())
         finally:
             conn.close()
 
@@ -1048,8 +1652,14 @@ class HHomeCollectionCore:
         house_flat_no = (payload.get("house_flat_no") or "").strip()
         colony_id = int(payload.get("colony_id", 0))
         city = (payload.get("city") or "").strip()
+        is_full_house = self._as_bool_flag(payload.get("full_house"))
+        floor_value = self._normalize_floor_value(payload.get("floor"), is_full_house)
+        block_tower_no = self._normalize_block_tower_no(payload.get("block_tower_no"))
+        street_line = self._compose_street_line(None, payload.get("street_sector") or payload.get("street_line"))
         if not house_flat_no or not colony_id or not city:
             return {"ok": False, "message": "House/Flat, colony and city are required"}
+        if not floor_value:
+            return {"ok": False, "message": "Floor number 1-99 or Full House is required"}
 
         conn = get_db_connection()
         try:
@@ -1076,6 +1686,8 @@ class HHomeCollectionCore:
                 colony = cur.fetchone()
                 if not colony:
                     return {"ok": False, "message": "Invalid colony"}
+                if not self._norm_code(colony.get("pincode")) or not self._norm_code(colony.get("route_no")):
+                    return {"ok": False, "message": "Selected colony is missing pincode or route"}
 
                 cur.execute(
                     """
@@ -1083,12 +1695,14 @@ class HHomeCollectionCore:
                     SET address_type=%s,
                         house_flat_no=%s,
                         floor=%s,
+                        block_tower_no=%s,
                         street_line=%s,
                         landmark=%s,
+                        google_location=%s,
                         colony_id=%s,
-                        colony_name_snapshot=%s,
-                        pincode_snapshot=%s,
-                        route_no_snapshot=%s,
+                        colony_name=%s,
+                        pincode=%s,
+                        route_no=%s,
                         city=%s,
                         access_notes=%s
                     WHERE id=%s
@@ -1096,9 +1710,11 @@ class HHomeCollectionCore:
                     (
                         payload.get("address_type") or "Home",
                         house_flat_no,
-                        payload.get("floor") or None,
-                        payload.get("street_line") or None,
+                        floor_value or None,
+                        block_tower_no or None,
+                        street_line or None,
                         payload.get("landmark") or None,
+                        payload.get("google_location") or None,
                         colony_id,
                         colony["colony_name"],
                         colony["pincode"],
@@ -1161,8 +1777,8 @@ class HHomeCollectionCore:
 
                 cur.execute(
                     """
-                    SELECT hcb.id, hcb.preferred_time_slot, am.route_no_snapshot AS route_name,
-                           am.city, am.colony_name_snapshot, cm.primary_mobile
+                    SELECT hcb.id, hcb.preferred_time_slot, am.route_no AS route_name,
+                           am.city, am.colony_name, cm.primary_mobile
                     FROM hhome_collection_booking hcb
                     INNER JOIN haddress_master am ON am.id = hcb.selected_address_id
                     INNER JOIN hcaller_master cm ON cm.id = hcb.caller_id
@@ -1186,7 +1802,7 @@ class HHomeCollectionCore:
                         "slot_key": self._slot_start_key(row.get("preferred_time_slot") or ""),
                         "route": route_name,
                         "city": row.get("city") or "",
-                        "area": row.get("colony_name_snapshot") or "",
+                        "area": row.get("colony_name") or "",
                         "mobile": row.get("primary_mobile") or "",
                     }
                 )
@@ -1257,6 +1873,34 @@ class HHomeCollectionCore:
         if not ccid or not gc or not sc:
             return []
         return self._panel_catalog["tests_by_comp_g_s"].get((ccid, gc, sc), [])
+
+    def search_panel_tests(self, comp_cat_id: str, query: str, limit: int = 50):
+        self.preload_panel_catalog()
+        ccid = (comp_cat_id or "").strip()
+        q = self._norm_code(query).lower()
+        if not ccid or len(q) < 2:
+            return []
+
+        try:
+            safe_limit = max(1, min(int(limit or 50), 100))
+        except Exception:
+            safe_limit = 50
+
+        matches = []
+        rows = self._panel_catalog["tests_search_by_comp"].get(ccid, [])
+        for row in rows:
+            desc_lc = self._norm_code(row.get("description_lc")).lower()
+            if not desc_lc or q not in desc_lc:
+                continue
+            matches.append(dict(row))
+
+        matches.sort(key=lambda x: (
+            self._norm_code(x.get("description")).lower(),
+            self._norm_code(x.get("gcode")),
+            self._norm_code(x.get("scode")),
+            self._norm_code(x.get("booked_code")),
+        ))
+        return matches[:safe_limit]
 
     def panel_child_tests(self, parent_gcode: str, parent_scode: str, parent_test_code: str):
         self.preload_panel_catalog()
@@ -1344,9 +1988,9 @@ class HHomeCollectionCore:
                     INSERT INTO hhome_collection_booking
                     (booking_code, caller_id, selected_address_id, address_snapshot_json,
                      preferred_visit_date, preferred_time_slot, booking_status,
-                     special_instructions, remarks, assigned_phlebotomist_id,
-                     created_by, updated_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,0,%s,%s,NULL,%s,%s)
+                     strt_time, cmplt_time, referred_by, intrnl_rfrncd_by, remarks, assigned_phlebotomist_id,
+                     created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,0,NULL,NULL,%s,%s,%s,NULL,%s)
                     """,
                     (
                         tmp,
@@ -1355,9 +1999,9 @@ class HHomeCollectionCore:
                         hto_json(selected_snapshot),
                         preferred_visit_date,
                         preferred_time_slot,
-                        payload.get("special_instructions") or None,
+                        payload.get("referred_by") or None,
+                        payload.get("intrnl_rfrncd_by") or None,
                         payload.get("remarks") or None,
-                        actor,
                         actor,
                     ),
                 )
@@ -1382,60 +2026,79 @@ class HHomeCollectionCore:
                     booking_patient_id = cur.lastrowid
 
                     patient_meta = tests_meta_map.get(str(pid)) or tests_meta_map.get(pid) or {}
-                    panel = patient_meta.get("panel") or {}
-                    billing = patient_meta.get("billing") or {}
-                    selected_tests = patient_meta.get("selected_tests") or []
+                    panel_sections = self._patient_panel_sections(patient_meta)
+                    duplicate_check = self._validate_patient_test_duplicates(pid, panel_sections)
+                    if not duplicate_check.get("ok"):
+                        conn.rollback()
+                        return duplicate_check
 
-                    for t in selected_tests:
-                        booked_code = self._norm_code(t.get("booked_code") or t.get("test_code"))
-                        if not booked_code:
-                            continue
-                        test_name = self._norm_code(t.get("description") or booked_code)
-                        cur.execute(
-                            """
-                            INSERT INTO hhome_collection_booking_patient_test
-                            (booking_id, booking_patient_id, patient_id, panel_company, comp_cat_id,
-                             cat_details, gcode, scode, test_code, booked_code, test_name,
-                             charge, mrp, max_discount, created_by)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                            ON DUPLICATE KEY UPDATE
-                            panel_company=VALUES(panel_company),
-                            comp_cat_id=VALUES(comp_cat_id),
-                            cat_details=VALUES(cat_details),
-                            gcode=VALUES(gcode),
-                            scode=VALUES(scode),
-                            test_code=VALUES(test_code),
-                            test_name=VALUES(test_name),
-                            charge=VALUES(charge),
-                            mrp=VALUES(mrp),
-                            max_discount=VALUES(max_discount)
-                            """,
-                            (
-                                booking_id,
-                                booking_patient_id,
-                                pid,
-                                self._norm_code(panel.get("pname")),
-                                self._norm_code(billing.get("comp_cat_id")),
-                                self._norm_code(billing.get("cat_details")),
-                                self._norm_code(t.get("gcode")),
-                                self._norm_code(t.get("scode")),
-                                self._norm_code(t.get("test_code")),
-                                booked_code,
-                                test_name,
-                                _to_num(t.get("charge")),
-                                _to_num(t.get("mrp")),
-                                _to_num(t.get("max_discount")),
-                                actor,
-                            ),
-                        )
+                    for section in panel_sections:
+                        panel = section.get("panel") or {}
+                        billing = section.get("billing") or {}
+                        selected_charge_mode = self._selected_charge_mode(billing)
+                        selected_tests = section.get("selected_tests") or []
 
+                        for t in selected_tests:
+                            booked_code = self._norm_code(t.get("booked_code"))
+                            if not booked_code:
+                                continue
+                            test_name = self._norm_code(t.get("description") or booked_code)
+                            cur.execute(
+                                """
+                                INSERT INTO hhome_collection_booking_patient_test
+                                (booking_id, booking_patient_id, patient_id, panel_company, comp_cat_id,
+                                 cat_details, selected_charge_mode, booked_code, test_name, charge, mrp, max_discount, test_status, created_by)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                ON DUPLICATE KEY UPDATE
+                                panel_company=VALUES(panel_company),
+                                comp_cat_id=VALUES(comp_cat_id),
+                                cat_details=VALUES(cat_details),
+                                selected_charge_mode=VALUES(selected_charge_mode),
+                                booked_code=VALUES(booked_code),
+                                test_name=VALUES(test_name),
+                                charge=VALUES(charge),
+                                mrp=VALUES(mrp),
+                                max_discount=VALUES(max_discount),
+                                test_status=VALUES(test_status)
+                                """,
+                                (
+                                    booking_id,
+                                    booking_patient_id,
+                                    pid,
+                                    self._norm_code(panel.get("pname")),
+                                    self._norm_code(billing.get("comp_cat_id")),
+                                    self._norm_code(billing.get("cat_details")),
+                                    selected_charge_mode,
+                                    booked_code,
+                                    test_name,
+                                    _to_num(t.get("charge")),
+                                    _to_num(t.get("mrp")),
+                                    _to_num(t.get("max_discount")),
+                                    "PENDING",
+                                    actor,
+                                ),
+                            )
+
+                self._recalculate_followup_required(cur, booking_id)
                 conn.commit()
-                return {
+
+                prescription_merge = {"ok": True, "moved": 0}
+                if payload.get("_session_ref") is not None:
+                    prescription_merge = self.merge_staged_prescriptions(
+                        payload.get("_session_ref"),
+                        booking_code,
+                        booking_id,
+                        actor_user_id=actor,
+                    )
+                result = {
                     "ok": True,
                     "booking_id": booking_id,
                     "booking_code": booking_code,
                     "print_url": f"/hhome-collection/print/{booking_id}",
                 }
+                if not prescription_merge.get("ok"):
+                    result["prescription_warning"] = prescription_merge.get("message") or "Prescription files could not be finalized"
+                return result
         except Exception as exc:
             conn.rollback()
             return {"ok": False, "message": str(exc)}
@@ -1465,22 +2128,28 @@ class HHomeCollectionCore:
             filters.append("hcb.booking_status = %s")
             values.append(status_val)
         if params.get("route"):
-            filters.append("am.route_no_snapshot = %s")
+            filters.append("am.route_no = %s")
             values.append(params["route"])
         if params.get("search"):
             filters.append("(hcb.booking_code LIKE %s OR cm.primary_mobile LIKE %s)")
             values.extend([f"%{params['search']}%", f"%{params['search']}%"])
 
         where_clause = "WHERE " + " AND ".join(filters) if filters else ""
+        where_clause_appt = where_clause
+        where_clause_appt = where_clause_appt.replace("hcb.preferred_visit_date", "ap.preferred_visit_date")
+        where_clause_appt = where_clause_appt.replace("hcb.booking_status", "ap.appointment_status")
 
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
+                has_appointment_table = self._table_exists(cur, "hhome_collection_booking_appointment")
+
                 cur.execute(
                     f"""
                     SELECT hcb.id, hcb.preferred_visit_date, hcb.preferred_time_slot,
-                           hcb.booking_status, cm.full_name AS caller_name, cm.primary_mobile,
-                           am.colony_name_snapshot, am.route_no_snapshot,
+                           hcb.booking_status,
+                           cm.full_name AS caller_name, cm.primary_mobile,
+                           am.colony_name, am.route_no,
                            COUNT(hcbp.id) AS patient_count,
                            GROUP_CONCAT(
                              DISTINCT TRIM(CONCAT_WS(' ', p.title, p.full_name))
@@ -1497,7 +2166,60 @@ class HHomeCollectionCore:
                     """,
                     values,
                 )
-                return cur.fetchall()
+                booking_rows = cur.fetchall() or []
+
+                appointment_rows = []
+                if has_appointment_table:
+                    cur.execute(
+                        f"""
+                        SELECT ap.id AS appointment_id, ap.booking_id, ap.appointment_no,
+                               ap.preferred_visit_date, ap.preferred_time_slot,
+                               ap.appointment_status AS booking_status,
+                               cm.full_name AS caller_name, cm.primary_mobile,
+                               am.colony_name, am.route_no,
+                               COUNT(hcbp.id) AS patient_count,
+                               GROUP_CONCAT(
+                                 DISTINCT TRIM(CONCAT_WS(' ', p.title, p.full_name))
+                                 ORDER BY p.full_name SEPARATOR ', '
+                               ) AS patient_names
+                        FROM hhome_collection_booking_appointment ap
+                        INNER JOIN hhome_collection_booking hcb ON hcb.id = ap.booking_id
+                        INNER JOIN hcaller_master cm ON cm.id = hcb.caller_id
+                        LEFT JOIN haddress_master am ON am.id = ap.selected_address_id
+                        LEFT JOIN hhome_collection_booking_patient hcbp ON hcbp.booking_id = hcb.id
+                        LEFT JOIN hpatient_master p ON p.id = hcbp.patient_id
+                        {where_clause_appt}
+                        GROUP BY ap.id
+                        ORDER BY ap.id DESC
+                        """,
+                        values,
+                    )
+                    appointment_rows = cur.fetchall() or []
+
+                rows = []
+                for r in booking_rows:
+                    x = dict(r)
+                    x["row_type"] = "BOOKING"
+                    x["appointment_id"] = None
+                    x["appointment_no"] = None
+                    x["allow_book_appointment"] = True
+                    rows.append(x)
+                for r in appointment_rows:
+                    x = dict(r)
+                    x["id"] = int(x.get("appointment_id") or 0)
+                    x["row_type"] = "APPOINTMENT"
+                    x["allow_book_appointment"] = False
+                    rows.append(x)
+
+                rows.sort(
+                    key=lambda r: (
+                        str(r.get("preferred_visit_date") or ""),
+                        str(r.get("preferred_time_slot") or ""),
+                        int(r.get("id") or 0),
+                    ),
+                    reverse=True,
+                )
+                return rows
         finally:
             conn.close()
 
@@ -1508,8 +2230,8 @@ class HHomeCollectionCore:
                 cur.execute(
                     """
                     SELECT hcb.*, cm.full_name AS caller_name, cm.primary_mobile, cm.caller_code,
-                           am.house_flat_no, am.floor, am.street_line, am.landmark,
-                           am.colony_name_snapshot, am.pincode_snapshot, am.route_no_snapshot,
+                           am.house_flat_no, am.floor, am.block_tower_no, am.street_line, am.landmark, am.google_location,
+                           am.colony_name, am.pincode, am.route_no,
                            am.city
                     FROM hhome_collection_booking hcb
                     INNER JOIN hcaller_master cm ON cm.id = hcb.caller_id
@@ -1603,10 +2325,7 @@ class HHomeCollectionCore:
                     SELECT id, name AS full_name, contact
                     FROM users
                     WHERE status='Active'
-                      AND (
-                        designation='Home Collection Phlebo'
-                        OR role='phlebotomist'
-                      )
+                      AND designation='Home Collection Phlebo'
                     ORDER BY name
                     """
                 )
@@ -1616,76 +2335,1403 @@ class HHomeCollectionCore:
         finally:
             conn.close()
 
-    def assign_phlebotomist(self, booking_id: int, user_id: int, actor_user_id=None):
-        if booking_id <= 0 or user_id <= 0:
-            return {"ok": False, "message": "booking_id and user_id are required"}
+    def assign_phlebotomist(self, booking_id: int, user_id: int, actor_user_id=None, appointment_id: int = 0):
+        if user_id <= 0 or (booking_id <= 0 and appointment_id <= 0):
+            return {"ok": False, "message": "valid target and user_id are required"}
 
         actor = self._actor(actor_user_id)
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
+                if appointment_id > 0:
+                    cur.execute(
+                        """
+                        SELECT id, assigned_phlebotomist_id, appointment_status
+                        FROM hhome_collection_booking_appointment
+                        WHERE id=%s
+                        LIMIT 1
+                        """,
+                        (appointment_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return {"ok": False, "message": "Appointment not found"}
+                    if row.get("assigned_phlebotomist_id"):
+                        return {"ok": False, "message": "Appointment already assigned"}
+                    if int(row.get("appointment_status") or 0) not in (0, 1, 2):
+                        return {"ok": False, "message": "Appointment is not assignable"}
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking_appointment
+                        SET assigned_phlebotomist_id=%s, appointment_status=1, updated_by=%s
+                        WHERE id=%s
+                        """,
+                        (user_id, actor, appointment_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, assigned_phlebotomist_id, booking_status
+                        FROM hhome_collection_booking
+                        WHERE id=%s
+                        LIMIT 1
+                        """,
+                        (booking_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return {"ok": False, "message": "Booking not found"}
+
+                    if row.get("assigned_phlebotomist_id"):
+                        return {"ok": False, "message": "Booking already assigned"}
+
+                    if int(row.get("booking_status") or 0) not in (0, 1, 2):
+                        return {"ok": False, "message": "Booking is not assignable"}
+
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking
+                        SET assigned_phlebotomist_id=%s, booking_status=1
+                        WHERE id=%s
+                        """,
+                        (user_id, booking_id),
+                    )
+                    # Keep patient-level status in sync on booking assign.
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking_patient
+                        SET booking_patient_status=1
+                        WHERE booking_id=%s AND booking_patient_status=0
+                        """,
+                        (booking_id,),
+                    )
+                conn.commit()
+                return {"ok": True}
+        except Exception as exc:
+            conn.rollback()
+            return {"ok": False, "message": str(exc)}
+        finally:
+            conn.close()
+    def _insert_booking_action_audit(self, cur, booking_id: int, action_type: str, reason_text: str, old_values: dict | None, new_values: dict | None, done_by: int):
+        cur.execute(
+            """
+            INSERT INTO hbooking_action_audit
+            (booking_id, action_type, reason_text, old_values_json, new_values_json, done_by)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                booking_id,
+                action_type,
+                (reason_text or None),
+                (hto_json(old_values) if old_values is not None else None),
+                (hto_json(new_values) if new_values is not None else None),
+                done_by,
+            ),
+        )
+
+    def cancel_booking(self, booking_id: int, reason_text: str = "", actor_user_id=None, appointment_id: int = 0):
+        if booking_id <= 0 and appointment_id <= 0:
+            return {"ok": False, "message": "target id is required"}
+
+        reason = (reason_text or "").strip()
+        if not reason:
+            return {"ok": False, "message": "Cancel reason is required"}
+
+        actor = self._actor(actor_user_id)
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                if appointment_id > 0:
+                    cur.execute(
+                        """
+                        SELECT id, appointment_status
+                        FROM hhome_collection_booking_appointment
+                        WHERE id=%s
+                        LIMIT 1
+                        """,
+                        (appointment_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return {"ok": False, "message": "Appointment not found"}
+                    if int(row.get("appointment_status") or 0) == 3:
+                        return {"ok": False, "message": "Completed appointment cannot be cancelled"}
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking_appointment
+                        SET appointment_status=4, updated_by=%s, reason_text=%s
+                        WHERE id=%s
+                        """,
+                        (actor, reason, appointment_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, booking_status, preferred_visit_date, preferred_time_slot
+                        FROM hhome_collection_booking
+                        WHERE id=%s
+                        LIMIT 1
+                        """,
+                        (booking_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return {"ok": False, "message": "Booking not found"}
+
+                    if int(row.get("booking_status") or 0) == 3:
+                        return {"ok": False, "message": "Completed booking cannot be cancelled"}
+
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking
+                        SET booking_status=4
+                        WHERE id=%s
+                        """,
+                        (booking_id,),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking_patient
+                        SET booking_patient_status=4
+                        WHERE booking_id=%s
+                        """,
+                        (booking_id,),
+                    )
+
+                    self._insert_booking_action_audit(
+                        cur,
+                        booking_id=booking_id,
+                        action_type="CANCEL",
+                        reason_text=reason,
+                        old_values=None,
+                        new_values=None,
+                        done_by=actor,
+                    )
+                conn.commit()
+                return {"ok": True}
+        except Exception as exc:
+            conn.rollback()
+            return {"ok": False, "message": str(exc)}
+        finally:
+            conn.close()
+
+    def begin_modify_booking_session(self, booking_id: int, reason_text: str, session, actor_user_id=None):
+        if booking_id <= 0:
+            return {"ok": False, "message": "booking_id is required"}
+
+        reason = (reason_text or "").strip()
+        if not reason:
+            return {"ok": False, "message": "Modify reason is required"}
+
+        booking = self.get_booking_full(booking_id)
+        if not booking:
+            return {"ok": False, "message": "Booking not found"}
+
+        status_code = int(booking.get("booking_status") or 0)
+        if status_code == 3:
+            return {"ok": False, "message": "Completed booking cannot be modified"}
+        if status_code == 4:
+            return {"ok": False, "message": "Cancelled booking cannot be modified"}
+
+        caller_id = int(booking.get("caller_id") or 0)
+        address_id = int(booking.get("selected_address_id") or 0)
+        if caller_id <= 0 or address_id <= 0:
+            return {"ok": False, "message": "Booking context is incomplete"}
+
+        selected_patients = []
+        for p in (booking.get("patients") or []):
+            pid = int(p.get("patient_id") or 0)
+            if pid > 0:
+                selected_patients.append({"patient_id": pid})
+
+        tests_billing_map = {}
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, assigned_phlebotomist_id, booking_status
+                    SELECT patient_id, panel_company, comp_cat_id, cat_details, selected_charge_mode, booked_code, test_name,
+                           charge, mrp, max_discount
+                    FROM hhome_collection_booking_patient_test
+                    WHERE booking_id=%s
+                    ORDER BY id
+                    """,
+                    (booking_id,),
+                )
+                for row in cur.fetchall():
+                    pid = str(int(row.get("patient_id") or 0))
+                    if not pid or pid == "0":
+                        continue
+                    selected_charge_mode = self._selected_charge_mode({"selected_charge_mode": row.get("selected_charge_mode")})
+                    panel_key = "|".join(
+                        [
+                            self._norm_code(row.get("panel_company")),
+                            self._norm_code(row.get("comp_cat_id")),
+                            selected_charge_mode,
+                        ]
+                    )
+                    tb = tests_billing_map.setdefault(pid, {"panels": [], "_panel_index": {}})
+                    panel_idx = tb["_panel_index"].get(panel_key)
+                    if panel_idx is None:
+                        panel_idx = len(tb["panels"])
+                        tb["_panel_index"][panel_key] = panel_idx
+                        tb["panels"].append({
+                            "panel": {"pname": self._norm_code(row.get("panel_company"))},
+                            "billing": {
+                                "comp_cat_id": self._norm_code(row.get("comp_cat_id")),
+                                "cat_details": self._norm_code(row.get("cat_details")),
+                                "charge_mode_code": selected_charge_mode,
+                                "selected_charge_mode": selected_charge_mode,
+                            },
+                            "selected_tests": [],
+                        })
+                    panel_section = tb["panels"][panel_idx]
+                    panel_section["selected_tests"].append(
+                        {
+                            "booked_code": self._norm_code(row.get("booked_code")),
+                            "description": self._norm_code(row.get("test_name")),
+                            "charge": float(row.get("charge") or 0),
+                            "mrp": float(row.get("mrp") or 0),
+                            "max_discount": float(row.get("max_discount") or 0),
+                        }
+                    )
+
+            for tb in tests_billing_map.values():
+                tb.pop("_panel_index", None)
+                if tb.get("panels"):
+                    first = tb["panels"][0]
+                    tb["panel"] = first.get("panel") or {}
+                    tb["billing"] = first.get("billing") or {}
+                    tb["selected_tests"] = first.get("selected_tests") or []
+        finally:
+            conn.close()
+
+        address_snapshot = self.get_address_snapshot(address_id)
+        session["hcaller_id"] = caller_id
+        session["hselected_patients"] = selected_patients
+        session["hselected_address_id"] = address_id
+        session["hselected_address_snapshot"] = address_snapshot
+        session["search_mobile"] = self._norm_code(booking.get("primary_mobile"))
+        session["hmodify_context"] = {
+            "booking_id": booking_id,
+            "reason_text": reason,
+            "flow_type": "modify_booking",
+            "appointment": {
+                "preferred_visit_date": str(booking.get("preferred_visit_date") or ""),
+                "preferred_time_slot": self._norm_code(booking.get("preferred_time_slot")),
+                "referred_by": self._norm_code(booking.get("referred_by")),
+                "internal_ref": self._norm_code(booking.get("intrnl_rfrncd_by")),
+                "remarks": self._norm_code(booking.get("remarks")),
+            },
+            "tests_billing_map": tests_billing_map,
+            "searched_mobile": self._norm_code(booking.get("primary_mobile")),
+        }
+        return {"ok": True, "redirect_url": "/hhome-collection?mode=modify"}
+
+    def begin_followup_appointment_session(self, booking_id: int, reason_text: str, session, actor_user_id=None):
+        if booking_id <= 0:
+            return {"ok": False, "message": "booking_id is required"}
+
+        reason = (reason_text or "").strip()
+        booking = self.get_booking_full(booking_id)
+        if not booking:
+            return {"ok": False, "message": "Booking not found"}
+        if int(booking.get("booking_status") or 0) == 4:
+            return {"ok": False, "message": "Cancelled booking cannot create follow-up"}
+
+        caller_id = int(booking.get("caller_id") or 0)
+        address_id = int(booking.get("selected_address_id") or 0)
+        if caller_id <= 0 or address_id <= 0:
+            return {"ok": False, "message": "Booking context is incomplete"}
+
+        tests_billing_map = {}
+        selected_patients = []
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT patient_id, panel_company, comp_cat_id, cat_details, selected_charge_mode, booked_code, test_name,
+                           charge, mrp, max_discount
+                    FROM hhome_collection_booking_patient_test
+                    WHERE booking_id=%s
+                      AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+                    ORDER BY id
+                    """,
+                    (booking_id,),
+                )
+                rows = cur.fetchall() or []
+                if not rows:
+                    cur.execute(
+                        """
+                        SELECT patient_id, panel_company, comp_cat_id, cat_details, selected_charge_mode, booked_code, test_name,
+                               charge, mrp, max_discount
+                        FROM hhome_collection_booking_patient_test
+                        WHERE booking_id=%s
+                          AND UPPER(COALESCE(test_status, 'PENDING')) IN ('PENDING', 'COMPLETED')
+                        ORDER BY id
+                        """,
+                        (booking_id,),
+                    )
+                    rows = cur.fetchall() or []
+
+                patient_seen = set()
+                for row in rows:
+                    pid_i = int(row.get("patient_id") or 0)
+                    if pid_i <= 0:
+                        continue
+                    pid = str(pid_i)
+                    if pid_i not in patient_seen:
+                        patient_seen.add(pid_i)
+                        selected_patients.append({"patient_id": pid_i})
+                    selected_charge_mode = self._selected_charge_mode({"selected_charge_mode": row.get("selected_charge_mode")})
+                    panel_key = "|".join(
+                        [
+                            self._norm_code(row.get("panel_company")),
+                            self._norm_code(row.get("comp_cat_id")),
+                            selected_charge_mode,
+                        ]
+                    )
+                    tb = tests_billing_map.setdefault(pid, {"panels": [], "_panel_index": {}})
+                    panel_idx = tb["_panel_index"].get(panel_key)
+                    if panel_idx is None:
+                        panel_idx = len(tb["panels"])
+                        tb["_panel_index"][panel_key] = panel_idx
+                        tb["panels"].append(
+                            {
+                                "panel": {"pname": self._norm_code(row.get("panel_company"))},
+                                "billing": {
+                                    "comp_cat_id": self._norm_code(row.get("comp_cat_id")),
+                                    "cat_details": self._norm_code(row.get("cat_details")),
+                                    "charge_mode_code": selected_charge_mode,
+                                    "selected_charge_mode": selected_charge_mode,
+                                },
+                                "selected_tests": [],
+                            }
+                        )
+                    tb["panels"][panel_idx]["selected_tests"].append(
+                        {
+                            "booked_code": self._norm_code(row.get("booked_code")),
+                            "description": self._norm_code(row.get("test_name")),
+                            "charge": float(row.get("charge") or 0),
+                            "mrp": float(row.get("mrp") or 0),
+                            "max_discount": float(row.get("max_discount") or 0),
+                        }
+                    )
+
+                # Always include all linked patients in appointment wizard,
+                # even if a patient currently has no pending/completed tests in fetched rows.
+                cur.execute(
+                    """
+                    SELECT patient_id
+                    FROM hhome_collection_booking_patient
+                    WHERE booking_id=%s
+                    ORDER BY id
+                    """,
+                    (booking_id,),
+                )
+                for r in (cur.fetchall() or []):
+                    pid_i = int(r.get("patient_id") or 0)
+                    if pid_i <= 0:
+                        continue
+                    if pid_i not in patient_seen:
+                        patient_seen.add(pid_i)
+                        selected_patients.append({"patient_id": pid_i})
+                    pid = str(pid_i)
+                    tests_billing_map.setdefault(
+                        pid,
+                        {
+                            "panel": {},
+                            "billing": {},
+                            "selected_tests": [],
+                            "panels": [],
+                        },
+                    )
+
+            for tb in tests_billing_map.values():
+                tb.pop("_panel_index", None)
+                if tb.get("panels"):
+                    first = tb["panels"][0]
+                    tb["panel"] = first.get("panel") or {}
+                    tb["billing"] = first.get("billing") or {}
+                    tb["selected_tests"] = first.get("selected_tests") or []
+        finally:
+            conn.close()
+
+        address_snapshot = self.get_address_snapshot(address_id)
+        session["hcaller_id"] = caller_id
+        session["hselected_patients"] = selected_patients
+        session["hselected_address_id"] = address_id
+        session["hselected_address_snapshot"] = address_snapshot
+        session["search_mobile"] = self._norm_code(booking.get("primary_mobile"))
+        session["hmodify_context"] = {
+            "booking_id": booking_id,
+            "reason_text": reason,
+            "flow_type": "followup_appointment",
+            "appointment": {
+                "preferred_visit_date": str(booking.get("preferred_visit_date") or ""),
+                "preferred_time_slot": self._norm_code(booking.get("preferred_time_slot")),
+                "referred_by": self._norm_code(booking.get("referred_by")),
+                "internal_ref": self._norm_code(booking.get("intrnl_rfrncd_by")),
+                "remarks": self._norm_code(booking.get("remarks")),
+            },
+            "tests_billing_map": tests_billing_map,
+            "searched_mobile": self._norm_code(booking.get("primary_mobile")),
+        }
+        return {"ok": True, "redirect_url": "/hhome-collection?mode=modify"}
+
+    def begin_modify_appointment_session(self, booking_id: int, appointment_id: int, reason_text: str, session, actor_user_id=None):
+        if booking_id <= 0 or appointment_id <= 0:
+            return {"ok": False, "message": "booking_id and appointment_id are required"}
+
+        reason = (reason_text or "").strip()
+        if not reason:
+            return {"ok": False, "message": "Modify reason is required"}
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        ap.id,
+                        ap.booking_id,
+                        ap.selected_address_id,
+                        ap.address_snapshot_json,
+                        ap.selected_patient_ids_json,
+                        ap.preferred_visit_date,
+                        ap.preferred_time_slot,
+                        ap.appointment_status,
+                        ap.created_at,
+                        ap.remarks,
+                        ap.reason_text,
+                        hcb.caller_id,
+                        hcb.selected_address_id AS booking_address_id,
+                        cm.primary_mobile
+                    FROM hhome_collection_booking_appointment ap
+                    INNER JOIN hhome_collection_booking hcb ON hcb.id = ap.booking_id
+                    INNER JOIN hcaller_master cm ON cm.id = hcb.caller_id
+                    WHERE ap.id=%s AND ap.booking_id=%s
+                    LIMIT 1
+                    """,
+                    (appointment_id, booking_id),
+                )
+                ap = cur.fetchone()
+                if not ap:
+                    return {"ok": False, "message": "Appointment not found"}
+                if int(ap.get("appointment_status") or 0) == 3:
+                    return {"ok": False, "message": "Completed appointment cannot be modified"}
+                if int(ap.get("appointment_status") or 0) == 4:
+                    return {"ok": False, "message": "Cancelled appointment cannot be modified"}
+
+                caller_id = int(ap.get("caller_id") or 0)
+                address_id = int(ap.get("selected_address_id") or 0) or int(ap.get("booking_address_id") or 0)
+                if caller_id <= 0 or address_id <= 0:
+                    return {"ok": False, "message": "Appointment context is incomplete"}
+
+                snapshot_from_db = None
+                raw_snapshot = ap.get("address_snapshot_json")
+                if raw_snapshot:
+                    try:
+                        snapshot_from_db = json.loads(raw_snapshot)
+                    except Exception:
+                        snapshot_from_db = None
+
+                selected_patient_ids = self._patient_ids_from_json(ap.get("selected_patient_ids_json"))
+                if not selected_patient_ids and isinstance(snapshot_from_db, dict):
+                    legacy = snapshot_from_db.get("_selected_patient_ids")
+                    if isinstance(legacy, list):
+                        selected_patient_ids = sorted({int(x) for x in legacy if int(x or 0) > 0})
+                if not selected_patient_ids:
+                    created_at = ap.get("created_at")
+                    if created_at:
+                        cur.execute(
+                            """
+                            SELECT DISTINCT patient_id
+                            FROM hhome_collection_booking_patient_test
+                            WHERE booking_id=%s
+                              AND created_at IS NOT NULL
+                              AND ABS(TIMESTAMPDIFF(MINUTE, created_at, %s)) <= 3
+                            ORDER BY patient_id
+                            """,
+                            (booking_id, created_at),
+                        )
+                        selected_patient_ids = [
+                            int(r.get("patient_id") or 0)
+                            for r in (cur.fetchall() or [])
+                            if int(r.get("patient_id") or 0) > 0
+                        ]
+                if not selected_patient_ids:
+                    cur.execute(
+                        """
+                        SELECT patient_id
+                        FROM hhome_collection_booking_patient
+                        WHERE booking_id=%s
+                        ORDER BY patient_id
+                        """,
+                        (booking_id,),
+                    )
+                    selected_patient_ids = [
+                        int(r.get("patient_id") or 0)
+                        for r in (cur.fetchall() or [])
+                        if int(r.get("patient_id") or 0) > 0
+                    ]
+
+                selected_patients = [{"patient_id": pid} for pid in selected_patient_ids]
+                tests_billing_map = {}
+
+                if selected_patient_ids:
+                    placeholders = ",".join(["%s"] * len(selected_patient_ids))
+                    cur.execute(
+                        f"""
+                        SELECT patient_id, panel_company, comp_cat_id, cat_details, selected_charge_mode, booked_code, test_name,
+                               charge, mrp, max_discount
+                        FROM hhome_collection_booking_patient_test
+                        WHERE booking_id=%s
+                          AND patient_id IN ({placeholders})
+                          AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+                        ORDER BY id
+                        """,
+                        tuple([booking_id] + selected_patient_ids),
+                    )
+                    rows = cur.fetchall() or []
+                    for row in rows:
+                        pid = str(int(row.get("patient_id") or 0))
+                        if not pid or pid == "0":
+                            continue
+                        selected_charge_mode = self._selected_charge_mode(
+                            {"selected_charge_mode": row.get("selected_charge_mode")}
+                        )
+                        panel_key = "|".join(
+                            [
+                                self._norm_code(row.get("panel_company")),
+                                self._norm_code(row.get("comp_cat_id")),
+                                selected_charge_mode,
+                            ]
+                        )
+                        tb = tests_billing_map.setdefault(pid, {"panels": [], "_panel_index": {}})
+                        panel_idx = tb["_panel_index"].get(panel_key)
+                        if panel_idx is None:
+                            panel_idx = len(tb["panels"])
+                            tb["_panel_index"][panel_key] = panel_idx
+                            tb["panels"].append(
+                                {
+                                    "panel": {"pname": self._norm_code(row.get("panel_company"))},
+                                    "billing": {
+                                        "comp_cat_id": self._norm_code(row.get("comp_cat_id")),
+                                        "cat_details": self._norm_code(row.get("cat_details")),
+                                        "charge_mode_code": selected_charge_mode,
+                                        "selected_charge_mode": selected_charge_mode,
+                                    },
+                                    "selected_tests": [],
+                                }
+                            )
+                        tb["panels"][panel_idx]["selected_tests"].append(
+                            {
+                                "booked_code": self._norm_code(row.get("booked_code")),
+                                "description": self._norm_code(row.get("test_name")),
+                                "charge": float(row.get("charge") or 0),
+                                "mrp": float(row.get("mrp") or 0),
+                                "max_discount": float(row.get("max_discount") or 0),
+                            }
+                        )
+
+                for pid in selected_patient_ids:
+                    tests_billing_map.setdefault(
+                        str(pid),
+                        {"panel": {}, "billing": {}, "selected_tests": [], "panels": []},
+                    )
+
+                for tb in tests_billing_map.values():
+                    tb.pop("_panel_index", None)
+                    if tb.get("panels"):
+                        first = tb["panels"][0]
+                        tb["panel"] = first.get("panel") or {}
+                        tb["billing"] = first.get("billing") or {}
+                        tb["selected_tests"] = first.get("selected_tests") or []
+
+                snapshot = snapshot_from_db
+                if not isinstance(snapshot, dict) or not snapshot:
+                    snapshot = self.get_address_snapshot(address_id)
+                if not snapshot:
+                    return {"ok": False, "message": "Address snapshot not found"}
+
+        finally:
+            conn.close()
+
+        session["hcaller_id"] = caller_id
+        session["hselected_patients"] = selected_patients
+        session["hselected_address_id"] = address_id
+        session["hselected_address_snapshot"] = snapshot
+        session["search_mobile"] = self._norm_code(ap.get("primary_mobile"))
+        session["hmodify_context"] = {
+            "booking_id": booking_id,
+            "appointment_id": appointment_id,
+            "reason_text": reason,
+            "flow_type": "modify_appointment",
+            "appointment": {
+                "preferred_visit_date": str(ap.get("preferred_visit_date") or ""),
+                "preferred_time_slot": self._norm_code(ap.get("preferred_time_slot")),
+                "remarks": self._norm_code(ap.get("remarks")),
+            },
+            "tests_billing_map": tests_billing_map,
+            "searched_mobile": self._norm_code(ap.get("primary_mobile")),
+        }
+        return {"ok": True, "redirect_url": "/hhome-collection?mode=modify"}
+
+    def modify_appointment(
+        self,
+        booking_id,
+        appointment_id,
+        caller_id,
+        selected_patients,
+        selected_address_id,
+        selected_snapshot,
+        payload,
+        actor_user_id=None,
+    ):
+        actor = self._actor(actor_user_id)
+        if booking_id <= 0 or appointment_id <= 0:
+            return {"ok": False, "message": "booking_id and appointment_id are required"}
+        if not caller_id:
+            return {"ok": False, "message": "Caller is required"}
+        if not selected_patients:
+            return {"ok": False, "message": "Select at least one patient"}
+        if not selected_address_id or not selected_snapshot:
+            return {"ok": False, "message": "Select an address"}
+
+        preferred_visit_date = payload.get("preferred_visit_date")
+        preferred_time_slot = payload.get("preferred_time_slot")
+        if not preferred_visit_date or not preferred_time_slot:
+            return {"ok": False, "message": "Visit date and slot are required"}
+        if preferred_visit_date < str(date.today()):
+            return {"ok": False, "message": "Visit date cannot be in past"}
+
+        tests_meta_map = payload.get("patient_tests_meta_map") or {}
+        reason_text = self._norm_code(payload.get("modify_reason_text") or payload.get("reason_text"))
+
+        def _to_num(v):
+            try:
+                if v is None or v == "":
+                    return None
+                return float(v)
+            except Exception:
+                return None
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, booking_id, preferred_visit_date, appointment_status, assigned_phlebotomist_id
+                    FROM hhome_collection_booking_appointment
+                    WHERE id=%s AND booking_id=%s
+                    LIMIT 1
+                    """,
+                    (appointment_id, booking_id),
+                )
+                ap = cur.fetchone()
+                if not ap:
+                    return {"ok": False, "message": "Appointment not found"}
+                if int(ap.get("appointment_status") or 0) == 3:
+                    return {"ok": False, "message": "Completed appointment cannot be modified"}
+                if int(ap.get("appointment_status") or 0) == 4:
+                    return {"ok": False, "message": "Cancelled appointment cannot be modified"}
+
+                cur.execute(
+                    "SELECT id, patient_id FROM hhome_collection_booking_patient WHERE booking_id=%s",
+                    (booking_id,),
+                )
+                bp_map = {int(r.get("patient_id")): int(r.get("id")) for r in (cur.fetchall() or [])}
+                existing_patient_ids = {pid for pid in bp_map.keys() if pid > 0}
+                requested_patient_ids = {
+                    int(item.get("patient_id") or 0)
+                    for item in (selected_patients or [])
+                    if int(item.get("patient_id") or 0) > 0
+                }
+                if not requested_patient_ids:
+                    return {"ok": False, "message": "Select at least one patient for appointment"}
+                invalid_patient_ids = sorted(requested_patient_ids - existing_patient_ids)
+                if invalid_patient_ids:
+                    return {
+                        "ok": False,
+                        "message": "Patient add is not allowed in appointment flow. Please use only existing booking patients.",
+                    }
+                selected_patient_ids = sorted({int(x) for x in requested_patient_ids if int(x or 0) > 0})
+
+                desired_codes_by_pid = {}
+                desired_rows = []
+                for pid in selected_patient_ids:
+                    patient_meta = tests_meta_map.get(str(pid)) or tests_meta_map.get(pid) or {}
+                    if not patient_meta:
+                        return {"ok": False, "message": "Patient list cannot be changed in appointment flow. Please reload and try again."}
+                    panel_sections = self._patient_panel_sections(patient_meta)
+                    duplicate_check = self._validate_patient_test_duplicates(pid, panel_sections)
+                    if not duplicate_check.get("ok"):
+                        conn.rollback()
+                        return duplicate_check
+                    desired_codes_by_pid[pid] = set()
+                    for section in panel_sections:
+                        panel = section.get("panel") or {}
+                        billing = section.get("billing") or {}
+                        selected_charge_mode = self._selected_charge_mode(billing)
+                        for t in section.get("selected_tests") or []:
+                            booked_code = self._norm_code(t.get("booked_code"))
+                            if not booked_code:
+                                continue
+                            desired_codes_by_pid[pid].add(booked_code)
+                            desired_rows.append(
+                                {
+                                    "pid": pid,
+                                    "bp_id": bp_map.get(pid),
+                                    "panel_company": self._norm_code(panel.get("pname")),
+                                    "comp_cat_id": self._norm_code(billing.get("comp_cat_id")),
+                                    "cat_details": self._norm_code(billing.get("cat_details")),
+                                    "selected_charge_mode": selected_charge_mode,
+                                    "booked_code": booked_code,
+                                    "test_name": self._norm_code(t.get("description") or booked_code),
+                                    "charge": _to_num(t.get("charge")),
+                                    "mrp": _to_num(t.get("mrp")),
+                                    "max_discount": _to_num(t.get("max_discount")),
+                                }
+                            )
+
+                for pid in selected_patient_ids:
+                    desired_codes = desired_codes_by_pid.get(pid) or set()
+                    cur.execute(
+                        """
+                        SELECT booked_code
+                        FROM hhome_collection_booking_patient_test
+                        WHERE booking_id=%s AND patient_id=%s
+                          AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+                        """,
+                        (booking_id, pid),
+                    )
+                    existing_pending = {
+                        self._norm_code(r.get("booked_code"))
+                        for r in (cur.fetchall() or [])
+                        if self._norm_code(r.get("booked_code"))
+                    }
+                    to_drop = sorted(existing_pending - desired_codes)
+                    if to_drop:
+                        drop_ph = ",".join(["%s"] * len(to_drop))
+                        cur.execute(
+                            f"""
+                            UPDATE hhome_collection_booking_patient_test
+                            SET test_status='DROPPED', dropped_at=NOW(), dropped_by=%s
+                            WHERE booking_id=%s AND patient_id=%s
+                              AND booked_code IN ({drop_ph})
+                              AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+                            """,
+                            tuple([actor, booking_id, pid] + to_drop),
+                        )
+
+                for row in desired_rows:
+                    cur.execute(
+                        """
+                        INSERT INTO hhome_collection_booking_patient_test
+                        (booking_id, booking_patient_id, patient_id, panel_company, comp_cat_id,
+                         cat_details, selected_charge_mode, booked_code, test_name, charge, mrp, max_discount, test_status, created_by)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s)
+                        ON DUPLICATE KEY UPDATE
+                        panel_company=VALUES(panel_company),
+                        comp_cat_id=VALUES(comp_cat_id),
+                        cat_details=VALUES(cat_details),
+                        selected_charge_mode=VALUES(selected_charge_mode),
+                        test_name=VALUES(test_name),
+                        charge=VALUES(charge),
+                        mrp=VALUES(mrp),
+                        max_discount=VALUES(max_discount),
+                        test_status='PENDING',
+                        dropped_at=NULL,
+                        dropped_by=NULL
+                        """,
+                        (
+                            booking_id,
+                            row.get("bp_id"),
+                            row.get("pid"),
+                            row.get("panel_company"),
+                            row.get("comp_cat_id"),
+                            row.get("cat_details"),
+                            row.get("selected_charge_mode"),
+                            row.get("booked_code"),
+                            row.get("test_name"),
+                            row.get("charge"),
+                            row.get("mrp"),
+                            row.get("max_discount"),
+                            actor,
+                        ),
+                    )
+
+                old_visit_date = str(ap.get("preferred_visit_date") or "")
+                reset_assignment = old_visit_date != str(preferred_visit_date or "")
+                next_status = 0 if reset_assignment else int(ap.get("appointment_status") or 0)
+                next_assigned_user = None if reset_assignment else ap.get("assigned_phlebotomist_id")
+                cur.execute(
+                    """
+                    UPDATE hhome_collection_booking_appointment
+                    SET selected_address_id=%s,
+                        address_snapshot_json=%s,
+                        selected_patient_ids_json=%s,
+                        preferred_visit_date=%s,
+                        preferred_time_slot=%s,
+                        appointment_status=%s,
+                        assigned_phlebotomist_id=%s,
+                        remarks=%s,
+                        reason_text=%s,
+                        updated_by=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        selected_address_id,
+                        hto_json(selected_snapshot),
+                        self._patient_ids_to_json(selected_patient_ids),
+                        preferred_visit_date,
+                        preferred_time_slot,
+                        next_status,
+                        next_assigned_user,
+                        payload.get("remarks") or None,
+                        reason_text or None,
+                        actor,
+                        appointment_id,
+                    ),
+                )
+
+                self._recalculate_followup_required(cur, booking_id)
+                conn.commit()
+                return {"ok": True, "booking_id": booking_id, "appointment_id": appointment_id}
+        except Exception as exc:
+            conn.rollback()
+            return {"ok": False, "message": str(exc)}
+        finally:
+            conn.close()
+
+    def create_followup_appointment(self, booking_id, caller_id, selected_patients, selected_address_id, selected_snapshot, payload, actor_user_id=None):
+        actor = self._actor(actor_user_id)
+        if booking_id <= 0:
+            return {"ok": False, "message": "booking_id is required"}
+        if not caller_id:
+            return {"ok": False, "message": "Caller is required"}
+        if not selected_patients:
+            return {"ok": False, "message": "Select at least one patient"}
+        if not selected_address_id or not selected_snapshot:
+            return {"ok": False, "message": "Select an address"}
+
+        preferred_visit_date = payload.get("preferred_visit_date")
+        preferred_time_slot = payload.get("preferred_time_slot")
+        if not preferred_visit_date or not preferred_time_slot:
+            return {"ok": False, "message": "Visit date and slot are required"}
+        if preferred_visit_date < str(date.today()):
+            return {"ok": False, "message": "Visit date cannot be in past"}
+
+        tests_meta_map = payload.get("patient_tests_meta_map") or {}
+        reason_text = self._norm_code(payload.get("followup_reason_text") or payload.get("reason_text"))
+
+        def _to_num(v):
+            try:
+                if v is None or v == "":
+                    return None
+                return float(v)
+            except Exception:
+                return None
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, booking_code, booking_status
                     FROM hhome_collection_booking
                     WHERE id=%s
                     LIMIT 1
                     """,
                     (booking_id,),
                 )
-                row = cur.fetchone()
-                if not row:
+                booking = cur.fetchone()
+                if not booking:
                     return {"ok": False, "message": "Booking not found"}
+                if int(booking.get("booking_status") or 0) == 4:
+                    return {"ok": False, "message": "Cancelled booking cannot create follow-up"}
 
-                if row.get("assigned_phlebotomist_id"):
-                    return {"ok": False, "message": "Booking already assigned"}
-
-                if int(row.get("booking_status") or 0) not in (0, 1, 2):
-                    return {"ok": False, "message": "Booking is not assignable"}
-
+                appointment_no = self._next_appointment_no(cur, booking_id)
                 cur.execute(
                     """
-                    UPDATE hhome_collection_booking
-                    SET assigned_phlebotomist_id=%s, booking_status=1, updated_by=%s
-                    WHERE id=%s
+                    INSERT INTO hhome_collection_booking_appointment
+                    (booking_id, appointment_no, selected_address_id, address_snapshot_json, preferred_visit_date, preferred_time_slot,
+                     appointment_status, assigned_phlebotomist_id, remarks, reason_text, created_by, updated_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,0,NULL,%s,%s,%s,%s)
                     """,
-                    (user_id, actor, booking_id),
+                    (
+                        booking_id,
+                        appointment_no,
+                        selected_address_id,
+                        hto_json(selected_snapshot),
+                        preferred_visit_date,
+                        preferred_time_slot,
+                        payload.get("remarks") or None,
+                        reason_text or None,
+                        actor,
+                        actor,
+                    ),
                 )
-                # Keep patient-level status in sync on booking assign.
+                appointment_id = cur.lastrowid
+
+                cur.execute("SELECT id, patient_id FROM hhome_collection_booking_patient WHERE booking_id=%s", (booking_id,))
+                bp_map = {int(r.get("patient_id")): int(r.get("id")) for r in (cur.fetchall() or [])}
+                existing_patient_ids = {pid for pid in bp_map.keys() if pid > 0}
+                if not existing_patient_ids:
+                    return {"ok": False, "message": "No linked patients found for this booking"}
+                requested_patient_ids = {
+                    int(item.get("patient_id") or 0)
+                    for item in (selected_patients or [])
+                    if int(item.get("patient_id") or 0) > 0
+                }
+                if requested_patient_ids:
+                    invalid_patient_ids = sorted(requested_patient_ids - existing_patient_ids)
+                    if invalid_patient_ids:
+                        return {
+                            "ok": False,
+                            "message": "Patient add is not allowed in appointment flow. Please use only existing booking patients.",
+                        }
+                    selected_patient_ids = sorted(requested_patient_ids)
+                else:
+                    selected_patient_ids = sorted(existing_patient_ids)
+                if not selected_patient_ids:
+                    return {"ok": False, "message": "Select at least one patient for appointment"}
+                selected_patient_ids = sorted({int(x) for x in selected_patient_ids if int(x or 0) > 0})
                 cur.execute(
-                    """
-                    UPDATE hhome_collection_booking_patient
-                    SET booking_patient_status=1
-                    WHERE booking_id=%s AND booking_patient_status=0
-                    """,
-                    (booking_id,),
+                    "UPDATE hhome_collection_booking_appointment SET selected_patient_ids_json=%s WHERE id=%s",
+                    (self._patient_ids_to_json(selected_patient_ids), appointment_id),
                 )
+
+                desired_codes_by_pid = {}
+                desired_rows = []
+                for pid in selected_patient_ids:
+                    patient_meta = tests_meta_map.get(str(pid)) or tests_meta_map.get(pid) or {}
+                    if not patient_meta:
+                        return {"ok": False, "message": "Patient list cannot be changed in appointment flow. Please reload and try again."}
+                    panel_sections = self._patient_panel_sections(patient_meta)
+                    duplicate_check = self._validate_patient_test_duplicates(pid, panel_sections)
+                    if not duplicate_check.get("ok"):
+                        conn.rollback()
+                        return duplicate_check
+
+                    desired_codes_by_pid[pid] = set()
+                    for section in panel_sections:
+                        panel = section.get("panel") or {}
+                        billing = section.get("billing") or {}
+                        selected_charge_mode = self._selected_charge_mode(billing)
+                        for t in section.get("selected_tests") or []:
+                            booked_code = self._norm_code(t.get("booked_code"))
+                            if not booked_code:
+                                continue
+                            desired_codes_by_pid[pid].add(booked_code)
+                            desired_rows.append(
+                                {
+                                    "pid": pid,
+                                    "bp_id": bp_map.get(pid),
+                                    "panel_company": self._norm_code(panel.get("pname")),
+                                    "comp_cat_id": self._norm_code(billing.get("comp_cat_id")),
+                                    "cat_details": self._norm_code(billing.get("cat_details")),
+                                    "selected_charge_mode": selected_charge_mode,
+                                    "booked_code": booked_code,
+                                    "test_name": self._norm_code(t.get("description") or booked_code),
+                                    "charge": _to_num(t.get("charge")),
+                                    "mrp": _to_num(t.get("mrp")),
+                                    "max_discount": _to_num(t.get("max_discount")),
+                                }
+                            )
+
+                for pid in selected_patient_ids:
+                    desired_codes = desired_codes_by_pid.get(pid) or set()
+                    cur.execute(
+                        """
+                        SELECT booked_code
+                        FROM hhome_collection_booking_patient_test
+                        WHERE booking_id=%s AND patient_id=%s
+                          AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+                        """,
+                        (booking_id, pid),
+                    )
+                    existing_pending = {
+                        self._norm_code(r.get("booked_code"))
+                        for r in (cur.fetchall() or [])
+                        if self._norm_code(r.get("booked_code"))
+                    }
+                    to_drop = sorted(existing_pending - desired_codes)
+                    if to_drop:
+                        drop_ph = ",".join(["%s"] * len(to_drop))
+                        cur.execute(
+                            f"""
+                            UPDATE hhome_collection_booking_patient_test
+                            SET test_status='DROPPED', dropped_at=NOW(), dropped_by=%s
+                            WHERE booking_id=%s AND patient_id=%s
+                              AND booked_code IN ({drop_ph})
+                              AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+                            """,
+                            tuple([actor, booking_id, pid] + to_drop),
+                        )
+
+                for row in desired_rows:
+                    cur.execute(
+                        """
+                        INSERT INTO hhome_collection_booking_patient_test
+                        (booking_id, booking_patient_id, patient_id, panel_company, comp_cat_id,
+                         cat_details, selected_charge_mode, booked_code, test_name, charge, mrp, max_discount, test_status, created_by)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s)
+                        ON DUPLICATE KEY UPDATE
+                        panel_company=VALUES(panel_company),
+                        comp_cat_id=VALUES(comp_cat_id),
+                        cat_details=VALUES(cat_details),
+                        selected_charge_mode=VALUES(selected_charge_mode),
+                        test_name=VALUES(test_name),
+                        charge=VALUES(charge),
+                        mrp=VALUES(mrp),
+                        max_discount=VALUES(max_discount),
+                        test_status='PENDING',
+                        dropped_at=NULL,
+                        dropped_by=NULL
+                        """,
+                        (
+                            booking_id,
+                            row.get("bp_id"),
+                            row.get("pid"),
+                            row.get("panel_company"),
+                            row.get("comp_cat_id"),
+                            row.get("cat_details"),
+                            row.get("selected_charge_mode"),
+                            row.get("booked_code"),
+                            row.get("test_name"),
+                            row.get("charge"),
+                            row.get("mrp"),
+                            row.get("max_discount"),
+                            actor,
+                        ),
+                    )
+
+                pending_count = self._recalculate_followup_required(cur, booking_id)
+                appt_status = 0
+                cur.execute(
+                    "UPDATE hhome_collection_booking_appointment SET appointment_status=%s, updated_by=%s WHERE id=%s",
+                    (appt_status, actor, appointment_id),
+                )
+
                 conn.commit()
-                return {"ok": True}
+                return {
+                    "ok": True,
+                    "booking_id": booking_id,
+                    "booking_code": self._norm_code(booking.get("booking_code")),
+                    "appointment_id": appointment_id,
+                    "appointment_no": appointment_no,
+                }
         except Exception as exc:
             conn.rollback()
             return {"ok": False, "message": str(exc)}
         finally:
             conn.close()
 
-    def cancel_booking(self, booking_id: int, actor_user_id=None):
+    def modify_booking(self, booking_id, caller_id, selected_patients, selected_address_id, selected_snapshot, payload, actor_user_id=None):
+        actor = self._actor(actor_user_id)
         if booking_id <= 0:
             return {"ok": False, "message": "booking_id is required"}
+        if not caller_id:
+            return {"ok": False, "message": "Caller is required"}
+        if not selected_patients:
+            return {"ok": False, "message": "Select at least one patient"}
+        if not selected_address_id or not selected_snapshot:
+            return {"ok": False, "message": "Select an address"}
+
+        preferred_visit_date = payload.get("preferred_visit_date")
+        preferred_time_slot = payload.get("preferred_time_slot")
+        if not preferred_visit_date or not preferred_time_slot:
+            return {"ok": False, "message": "Visit date and slot are required"}
+
+        if preferred_visit_date < str(date.today()):
+            return {"ok": False, "message": "Visit date cannot be in past"}
+
+        tests_meta_map = payload.get("patient_tests_meta_map") or {}
+        modify_reason = (payload.get("modify_reason_text") or "").strip()
+        if not modify_reason:
+            return {"ok": False, "message": "Modify reason is required"}
+
+        def _to_num(v):
+            try:
+                if v is None or v == "":
+                    return None
+                return float(v)
+            except Exception:
+                return None
 
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE hhome_collection_booking SET booking_status=4, updated_by=%s WHERE id=%s",
-                    (self._actor(actor_user_id), booking_id),
+                    """
+                    SELECT id, booking_code, caller_id, selected_address_id, preferred_visit_date, preferred_time_slot,
+                           referred_by, intrnl_rfrncd_by, remarks, booking_status, assigned_phlebotomist_id
+                    FROM hhome_collection_booking
+                    WHERE id=%s
+                    LIMIT 1
+                    """,
+                    (booking_id,),
                 )
+                old_booking = cur.fetchone()
+                if not old_booking:
+                    return {"ok": False, "message": "Booking not found"}
+                if int(old_booking.get("booking_status") or 0) == 3:
+                    return {"ok": False, "message": "Completed booking cannot be modified"}
+                if int(old_booking.get("booking_status") or 0) == 4:
+                    return {"ok": False, "message": "Cancelled booking cannot be modified"}
+
+                old_values = {}
+                new_values = {}
+                old_booking_status = int(old_booking.get("booking_status") or 0)
+                old_visit_date = str(old_booking.get("preferred_visit_date") or "")
+                new_visit_date = str(preferred_visit_date or "")
+                should_reset_by_date_change = old_visit_date != new_visit_date
+
+                def mark_change(field, old_v, new_v):
+                    old_s = self._norm_code(old_v) if old_v is not None else ""
+                    new_s = self._norm_code(new_v) if new_v is not None else ""
+                    if field in ("selected_address_id", "caller_id", "booking_status", "assigned_phlebotomist_id"):
+                        old_s = str(int(old_v or 0))
+                        new_s = str(int(new_v or 0))
+                    if old_s != new_s:
+                        old_values[field] = old_v
+                        new_values[field] = new_v
+
+                mark_change("caller_id", old_booking.get("caller_id"), caller_id)
+                mark_change("selected_address_id", old_booking.get("selected_address_id"), selected_address_id)
+                mark_change("preferred_visit_date", old_booking.get("preferred_visit_date"), preferred_visit_date)
+                mark_change("preferred_time_slot", old_booking.get("preferred_time_slot"), preferred_time_slot)
+                mark_change("referred_by", old_booking.get("referred_by"), payload.get("referred_by") or None)
+                mark_change("intrnl_rfrncd_by", old_booking.get("intrnl_rfrncd_by"), payload.get("intrnl_rfrncd_by") or None)
+                mark_change("remarks", old_booking.get("remarks"), payload.get("remarks") or None)
+                if should_reset_by_date_change:
+                    mark_change("booking_status", old_booking.get("booking_status"), 0)
+                    mark_change("assigned_phlebotomist_id", old_booking.get("assigned_phlebotomist_id") or 0, 0)
+
+                if new_values:
+                    next_booking_status = 0 if should_reset_by_date_change else old_booking_status
+                    next_assigned_user_id = None if should_reset_by_date_change else old_booking.get("assigned_phlebotomist_id")
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking
+                        SET caller_id=%s,
+                            selected_address_id=%s,
+                            address_snapshot_json=%s,
+                            preferred_visit_date=%s,
+                            preferred_time_slot=%s,
+                            booking_status=%s,
+                            referred_by=%s,
+                            intrnl_rfrncd_by=%s,
+                            remarks=%s,
+                            assigned_phlebotomist_id=%s
+                        WHERE id=%s
+                        """,
+                        (
+                            caller_id,
+                            selected_address_id,
+                            hto_json(selected_snapshot),
+                            preferred_visit_date,
+                            preferred_time_slot,
+                            next_booking_status,
+                            payload.get("referred_by") or None,
+                            payload.get("intrnl_rfrncd_by") or None,
+                            payload.get("remarks") or None,
+                            next_assigned_user_id,
+                            booking_id,
+                        ),
+                    )
+
+                cur.execute("SELECT patient_id FROM hhome_collection_booking_patient WHERE booking_id=%s", (booking_id,))
+                old_patient_ids = sorted([int(r.get("patient_id") or 0) for r in cur.fetchall() if int(r.get("patient_id") or 0) > 0])
+                new_patient_ids = sorted(list({int(item.get("patient_id")) for item in selected_patients if int(item.get("patient_id") or 0) > 0}))
+                old_set = set(old_patient_ids)
+                new_set = set(new_patient_ids)
+                to_remove = sorted(old_set - new_set)
+                to_add = sorted(new_set - old_set)
+
+                if old_patient_ids != new_patient_ids:
+                    old_values["patient_ids"] = old_patient_ids
+                    new_values["patient_ids"] = new_patient_ids
+                    if to_remove:
+                        remove_placeholders = ",".join(["%s"] * len(to_remove))
+                        cur.execute(
+                            f"""
+                            DELETE FROM hhome_collection_booking_patient_test
+                            WHERE booking_id=%s
+                              AND patient_id IN ({remove_placeholders})
+                            """,
+                            tuple([booking_id] + to_remove),
+                        )
+                        cur.execute(
+                            f"""
+                            DELETE FROM hhome_collection_booking_patient
+                            WHERE booking_id=%s
+                              AND patient_id IN ({remove_placeholders})
+                            """,
+                            tuple([booking_id] + to_remove),
+                        )
+                    for pid in to_add:
+                        next_patient_status = 0 if should_reset_by_date_change else old_booking_status
+                        cur.execute(
+                            """
+                            INSERT INTO hhome_collection_booking_patient
+                            (booking_id, patient_id, booking_patient_status, created_by)
+                            VALUES (%s,%s,%s,%s)
+                            """,
+                            (booking_id, pid, next_patient_status, actor),
+                        )
+                elif should_reset_by_date_change:
+                    cur.execute(
+                        """
+                        UPDATE hhome_collection_booking_patient
+                        SET booking_patient_status=0
+                        WHERE booking_id=%s
+                        """,
+                        (booking_id,),
+                    )
+
+                cur.execute(
+                    "SELECT id, patient_id FROM hhome_collection_booking_patient WHERE booking_id=%s",
+                    (booking_id,),
+                )
+                bp_map = {int(r.get("patient_id")): int(r.get("id")) for r in cur.fetchall()}
+
+                test_snapshot = {}
+                for pid in new_patient_ids:
+                    bp_id = bp_map.get(pid)
+                    if not bp_id:
+                        continue
+                    patient_meta = tests_meta_map.get(str(pid)) or tests_meta_map.get(pid) or {}
+                    panel_sections = self._patient_panel_sections(patient_meta)
+                    duplicate_check = self._validate_patient_test_duplicates(pid, panel_sections)
+                    if not duplicate_check.get("ok"):
+                        conn.rollback()
+                        return duplicate_check
+                    selected_tests = []
+                    for section in panel_sections:
+                        selected_tests.extend(section.get("selected_tests") or [])
+                    selected_codes = [self._norm_code(t.get("booked_code")) for t in selected_tests if self._norm_code(t.get("booked_code"))]
+                    test_snapshot[str(pid)] = selected_codes
+
+                    cur.execute(
+                        """
+                        SELECT booked_code
+                        FROM hhome_collection_booking_patient_test
+                        WHERE booking_id=%s AND patient_id=%s
+                        """,
+                        (booking_id, pid),
+                    )
+                    existing_codes = {self._norm_code(r.get("booked_code")) for r in (cur.fetchall() or []) if self._norm_code(r.get("booked_code"))}
+                    selected_code_set = set(selected_codes)
+                    to_delete_codes = sorted(existing_codes - selected_code_set)
+                    if to_delete_codes:
+                        del_placeholders = ",".join(["%s"] * len(to_delete_codes))
+                        cur.execute(
+                            f"""
+                            UPDATE hhome_collection_booking_patient_test
+                            SET test_status='DROPPED', dropped_at=NOW(), dropped_by=%s
+                            WHERE booking_id=%s AND patient_id=%s
+                              AND booked_code IN ({del_placeholders})
+                              AND UPPER(COALESCE(test_status, 'PENDING'))='PENDING'
+                            """,
+                            tuple([actor, booking_id, pid] + to_delete_codes),
+                        )
+
+                    for section in panel_sections:
+                        panel = section.get("panel") or {}
+                        billing = section.get("billing") or {}
+                        selected_charge_mode = self._selected_charge_mode(billing)
+
+                        for t in section.get("selected_tests") or []:
+                            booked_code = self._norm_code(t.get("booked_code"))
+                            if not booked_code:
+                                continue
+                            test_name = self._norm_code(t.get("description") or booked_code)
+                            cur.execute(
+                                """
+                                INSERT INTO hhome_collection_booking_patient_test
+                                (booking_id, booking_patient_id, patient_id, panel_company, comp_cat_id,
+                                 cat_details, selected_charge_mode, booked_code, test_name, charge, mrp, max_discount, test_status, created_by)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                ON DUPLICATE KEY UPDATE
+                                panel_company=VALUES(panel_company),
+                                comp_cat_id=VALUES(comp_cat_id),
+                                cat_details=VALUES(cat_details),
+                                selected_charge_mode=VALUES(selected_charge_mode),
+                                booked_code=VALUES(booked_code),
+                                test_name=VALUES(test_name),
+                                charge=VALUES(charge),
+                                mrp=VALUES(mrp),
+                                max_discount=VALUES(max_discount),
+                                test_status=VALUES(test_status),
+                                dropped_at=NULL,
+                                dropped_by=NULL
+                                """,
+                                (
+                                    booking_id,
+                                    bp_id,
+                                    pid,
+                                    self._norm_code(panel.get("pname")),
+                                    self._norm_code(billing.get("comp_cat_id")),
+                                    self._norm_code(billing.get("cat_details")),
+                                    selected_charge_mode,
+                                    booked_code,
+                                    test_name,
+                                    _to_num(t.get("charge")),
+                                    _to_num(t.get("mrp")),
+                                    _to_num(t.get("max_discount")),
+                                    "PENDING",
+                                    actor,
+                                ),
+                            )
+
+                old_values["tests"] = "updated"
+                new_values["tests"] = test_snapshot
+                self._recalculate_followup_required(cur, booking_id)
+
+                audit_old_values = {
+                    "preferred_visit_date": str(old_booking.get("preferred_visit_date") or ""),
+                    "preferred_time_slot": self._norm_code(old_booking.get("preferred_time_slot")),
+                }
+                audit_new_values = {
+                    "preferred_visit_date": str(preferred_visit_date or ""),
+                    "preferred_time_slot": self._norm_code(preferred_time_slot),
+                }
+
+                self._insert_booking_action_audit(
+                    cur,
+                    booking_id=booking_id,
+                    action_type="MODIFY",
+                    reason_text=modify_reason,
+                    old_values=audit_old_values,
+                    new_values=audit_new_values,
+                    done_by=actor,
+                )
+
                 conn.commit()
-                return {"ok": True}
+
+                prescription_merge = {"ok": True, "moved": 0}
+                if payload.get("_session_ref") is not None:
+                    prescription_merge = self.merge_staged_prescriptions(
+                        payload.get("_session_ref"),
+                        self._norm_code(old_booking.get("booking_code")),
+                        booking_id,
+                        actor_user_id=actor,
+                    )
+
+                result = {"ok": True, "booking_id": booking_id, "booking_code": self._norm_code(old_booking.get("booking_code"))}
+                if not prescription_merge.get("ok"):
+                    result["prescription_warning"] = prescription_merge.get("message") or "Prescription files could not be finalized"
+                return result
         except Exception as exc:
             conn.rollback()
             return {"ok": False, "message": str(exc)}
         finally:
             conn.close()
+
 
     def assignment_planner_data(self, plan_date: str | None):
         target_date = (plan_date or "").strip()
@@ -1715,9 +3761,9 @@ class HHomeCollectionCore:
                         hcb.id AS booking_id,
                         hcb.preferred_time_slot,
                         hcb.booking_status,
-                        COALESCE(NULLIF(TRIM(am.route_no_snapshot), ''), 'UNASSIGNED') AS route_name,
+                        COALESCE(NULLIF(TRIM(am.route_no), ''), 'UNASSIGNED') AS route_name,
                         hcb.assigned_phlebotomist_id,
-                        am.colony_name_snapshot,
+                        am.colony_name,
                         am.city,
                         cm.primary_mobile AS caller_mobile,
                         COUNT(DISTINCT hbp.patient_id) AS patient_count
@@ -1727,20 +3773,58 @@ class HHomeCollectionCore:
                     LEFT JOIN hhome_collection_booking_patient hbp ON hbp.booking_id = hcb.id
                     WHERE hcb.preferred_visit_date = %s
                       AND hcb.booking_status IN (0, 1, 2)
+                      AND (hcb.assigned_phlebotomist_id IS NULL OR hcb.assigned_phlebotomist_id = 0)
                     GROUP BY
                         hcb.id,
                         hcb.preferred_time_slot,
                         hcb.booking_status,
                         route_name,
                         hcb.assigned_phlebotomist_id,
-                        am.colony_name_snapshot,
+                        am.colony_name,
                         am.city,
                         cm.primary_mobile
                     ORDER BY hcb.id DESC
                     """,
                     (target_date,),
                 )
-                rows = cur.fetchall()
+                rows = cur.fetchall() or []
+
+                cur.execute(
+                    """
+                    SELECT
+                        ap.id AS appointment_id,
+                        ap.booking_id AS parent_booking_id,
+                        ap.preferred_time_slot,
+                        ap.appointment_status AS booking_status,
+                        COALESCE(NULLIF(TRIM(am.route_no), ''), 'UNASSIGNED') AS route_name,
+                        ap.assigned_phlebotomist_id,
+                        am.colony_name,
+                        am.city,
+                        cm.primary_mobile AS caller_mobile,
+                        COUNT(DISTINCT hbp.patient_id) AS patient_count
+                    FROM hhome_collection_booking_appointment ap
+                    INNER JOIN hhome_collection_booking hcb ON hcb.id = ap.booking_id
+                    LEFT JOIN haddress_master am ON am.id = ap.selected_address_id
+                    INNER JOIN hcaller_master cm ON cm.id = hcb.caller_id
+                    LEFT JOIN hhome_collection_booking_patient hbp ON hbp.booking_id = hcb.id
+                    WHERE ap.preferred_visit_date = %s
+                      AND ap.appointment_status IN (0, 1, 2)
+                      AND (ap.assigned_phlebotomist_id IS NULL OR ap.assigned_phlebotomist_id = 0)
+                    GROUP BY
+                        ap.id,
+                        ap.booking_id,
+                        ap.preferred_time_slot,
+                        ap.appointment_status,
+                        route_name,
+                        ap.assigned_phlebotomist_id,
+                        am.colony_name,
+                        am.city,
+                        cm.primary_mobile
+                    ORDER BY ap.id DESC
+                    """,
+                    (target_date,),
+                )
+                ap_rows = cur.fetchall() or []
 
             route_set = set(base_routes)
             grid_rows = []
@@ -1750,13 +3834,36 @@ class HHomeCollectionCore:
                 slot_text = self._norm_code(r.get("preferred_time_slot"))
                 grid_rows.append(
                     {
+                        "row_type": "BOOKING",
                         "booking_id": r.get("booking_id"),
+                        "appointment_id": 0,
                         "slot": slot_text,
                         "slot_key": self._slot_start_key(slot_text) or 9999,
                         "route_name": route_name,
                         "booking_status": int(r.get("booking_status") or 0),
                         "assigned_user_id": r.get("assigned_phlebotomist_id"),
-                        "colony_name_snapshot": self._norm_code(r.get("colony_name_snapshot")),
+                        "colony_name": self._norm_code(r.get("colony_name")),
+                        "city": self._norm_code(r.get("city")),
+                        "caller_mobile": self._norm_code(r.get("caller_mobile")),
+                        "patient_count": int(r.get("patient_count") or 0),
+                    }
+                )
+            for r in ap_rows:
+                route_name = self._norm_code(r.get("route_name")) or "UNASSIGNED"
+                route_set.add(route_name)
+                slot_text = self._norm_code(r.get("preferred_time_slot"))
+                grid_rows.append(
+                    {
+                        "row_type": "APPOINTMENT",
+                        "booking_id": -int(r.get("appointment_id") or 0),
+                        "appointment_id": int(r.get("appointment_id") or 0),
+                        "parent_booking_id": int(r.get("parent_booking_id") or 0),
+                        "slot": slot_text,
+                        "slot_key": self._slot_start_key(slot_text) or 9999,
+                        "route_name": route_name,
+                        "booking_status": int(r.get("booking_status") or 0),
+                        "assigned_user_id": r.get("assigned_phlebotomist_id"),
+                        "colony_name": self._norm_code(r.get("colony_name")),
                         "city": self._norm_code(r.get("city")),
                         "caller_mobile": self._norm_code(r.get("caller_mobile")),
                         "patient_count": int(r.get("patient_count") or 0),
@@ -1778,6 +3885,11 @@ class HHomeCollectionCore:
         finally:
             conn.close()
 
+
+
+
+
+
     def commit_assignment_plan(self, plan_date: str, assignments: list, actor_user_id=None):
         target_date = (plan_date or "").strip()
         if not target_date:
@@ -1789,95 +3901,172 @@ class HHomeCollectionCore:
         for item in assignments:
             try:
                 booking_id = int(item.get("booking_id", 0))
+                appointment_id = int(item.get("appointment_id", 0))
                 user_id = int(item.get("assigned_user_id", 0))
             except Exception:
                 continue
-            if booking_id <= 0 or user_id <= 0:
+            if appointment_id <= 0 and booking_id < 0:
+                appointment_id = abs(booking_id)
+            if user_id <= 0:
+                continue
+            row_type = self._norm_code(item.get("row_type")).upper()
+            if appointment_id > 0 or row_type == "APPOINTMENT":
+                if appointment_id <= 0:
+                    continue
+                normalized.append(
+                    {
+                        "row_type": "APPOINTMENT",
+                        "booking_id": int(item.get("parent_booking_id") or 0),
+                        "appointment_id": appointment_id,
+                        "assigned_user_id": user_id,
+                        "grouped_route": self._norm_code(item.get("grouped_route")),
+                    }
+                )
+                continue
+            if booking_id <= 0:
                 continue
             normalized.append(
                 {
+                    "row_type": "BOOKING",
                     "booking_id": booking_id,
+                    "appointment_id": 0,
                     "assigned_user_id": user_id,
                     "grouped_route": self._norm_code(item.get("grouped_route")),
                 }
             )
         if not normalized:
-            return {"ok": False, "message": "No valid booking assignments provided"}
+            return {"ok": False, "message": "No valid assignments provided"}
 
         actor = self._actor(actor_user_id)
-        booking_ids = sorted({x["booking_id"] for x in normalized})
-        booking_to_user = {x["booking_id"]: x["assigned_user_id"] for x in normalized}
+        booking_rows = [x for x in normalized if x.get("row_type") == "BOOKING"]
+        appointment_rows = [x for x in normalized if x.get("row_type") == "APPOINTMENT"]
+        booking_ids = sorted({x["booking_id"] for x in booking_rows if int(x.get("booking_id") or 0) > 0})
+        appointment_ids = sorted({x["appointment_id"] for x in appointment_rows if int(x.get("appointment_id") or 0) > 0})
+        booking_to_user = {x["booking_id"]: x["assigned_user_id"] for x in booking_rows if int(x.get("booking_id") or 0) > 0}
+        appointment_to_user = {x["appointment_id"]: x["assigned_user_id"] for x in appointment_rows if int(x.get("appointment_id") or 0) > 0}
 
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                placeholders = ",".join(["%s"] * len(booking_ids))
-                cur.execute(
-                    f"""
-                    SELECT id
-                    FROM hhome_collection_booking
-                    WHERE id IN ({placeholders})
-                      AND preferred_visit_date = %s
-                      AND booking_status IN (0, 1, 2)
-                      AND (assigned_phlebotomist_id IS NULL OR assigned_phlebotomist_id = 0)
-                    """,
-                    booking_ids + [target_date],
-                )
-                valid_ids = {int(r["id"]) for r in cur.fetchall()}
-                if not valid_ids:
-                    return {"ok": False, "message": "All selected bookings are already assigned or not assignable"}
+                valid_booking_ids = set()
+                valid_appointment_ids = set()
 
-                update_rows = [(booking_to_user[bid], actor, bid) for bid in booking_ids if bid in valid_ids]
-                cur.executemany(
-                    """
-                    UPDATE hhome_collection_booking
-                    SET assigned_phlebotomist_id=%s, booking_status=1, updated_by=%s
-                    WHERE id=%s
-                    """,
-                    update_rows,
-                )
+                if booking_ids:
+                    placeholders = ",".join(["%s"] * len(booking_ids))
+                    cur.execute(
+                        f"""
+                        SELECT id
+                        FROM hhome_collection_booking
+                        WHERE id IN ({placeholders})
+                          AND preferred_visit_date = %s
+                          AND booking_status IN (0, 1, 2)
+                          AND (assigned_phlebotomist_id IS NULL OR assigned_phlebotomist_id = 0)
+                        """,
+                        booking_ids + [target_date],
+                    )
+                    valid_booking_ids = {int(r["id"]) for r in (cur.fetchall() or [])}
 
-                cur.execute(
-                    f"""
-                    UPDATE hhome_collection_booking_patient
-                    SET booking_patient_status = 1
-                    WHERE booking_id IN ({",".join(["%s"] * len(valid_ids))})
-                      AND booking_patient_status = 0
-                    """,
-                    list(valid_ids),
-                )
+                if appointment_ids:
+                    placeholders = ",".join(["%s"] * len(appointment_ids))
+                    cur.execute(
+                        f"""
+                        SELECT id
+                        FROM hhome_collection_booking_appointment
+                        WHERE id IN ({placeholders})
+                          AND preferred_visit_date = %s
+                          AND appointment_status IN (0, 1, 2)
+                          AND (assigned_phlebotomist_id IS NULL OR assigned_phlebotomist_id = 0)
+                        """,
+                        appointment_ids + [target_date],
+                    )
+                    valid_appointment_ids = {int(r["id"]) for r in (cur.fetchall() or [])}
 
-                # Message preview payload (no DB route/address changes here)
-                cur.execute(
-                    f"""
-                    SELECT
-                        b.id AS booking_id,
-                        u.name AS phlebo_name,
-                        p.full_name AS patient_name,
-                        p.contact_mobile
-                    FROM hhome_collection_booking b
-                    INNER JOIN users u ON u.id = b.assigned_phlebotomist_id
-                    INNER JOIN hhome_collection_booking_patient bp ON bp.booking_id = b.id
-                    INNER JOIN hpatient_master p ON p.id = bp.patient_id
-                    WHERE b.id IN ({",".join(["%s"] * len(valid_ids))})
-                    ORDER BY b.id
-                    """,
-                    list(valid_ids),
-                )
-                msg_rows = cur.fetchall()
+                if not valid_booking_ids and not valid_appointment_ids:
+                    return {"ok": False, "message": "All selected rows are already assigned or not assignable"}
 
-                conn.commit()
+                if valid_booking_ids:
+                    cur.executemany(
+                        """
+                        UPDATE hhome_collection_booking
+                        SET assigned_phlebotomist_id=%s, booking_status=1
+                        WHERE id=%s
+                        """,
+                        [(booking_to_user[bid], bid) for bid in booking_ids if bid in valid_booking_ids],
+                    )
+                    cur.execute(
+                        f"""
+                        UPDATE hhome_collection_booking_patient
+                        SET booking_patient_status = 1
+                        WHERE booking_id IN ({",".join(["%s"] * len(valid_booking_ids))})
+                          AND booking_patient_status = 0
+                        """,
+                        list(valid_booking_ids),
+                    )
+
+                if valid_appointment_ids:
+                    cur.executemany(
+                        """
+                        UPDATE hhome_collection_booking_appointment
+                        SET assigned_phlebotomist_id=%s, appointment_status=1, updated_by=%s
+                        WHERE id=%s
+                        """,
+                        [(appointment_to_user[aid], actor, aid) for aid in appointment_ids if aid in valid_appointment_ids],
+                    )
+
+                msg_rows = []
+                if valid_booking_ids:
+                    cur.execute(
+                        f"""
+                        SELECT
+                            'BOOKING' AS row_type,
+                            b.id AS row_id,
+                            u.name AS phlebo_name,
+                            p.full_name AS patient_name,
+                            p.contact_mobile
+                        FROM hhome_collection_booking b
+                        INNER JOIN users u ON u.id = b.assigned_phlebotomist_id
+                        INNER JOIN hhome_collection_booking_patient bp ON bp.booking_id = b.id
+                        INNER JOIN hpatient_master p ON p.id = bp.patient_id
+                        WHERE b.id IN ({",".join(["%s"] * len(valid_booking_ids))})
+                        ORDER BY b.id
+                        """,
+                        list(valid_booking_ids),
+                    )
+                    msg_rows.extend(cur.fetchall() or [])
+
+                if valid_appointment_ids:
+                    cur.execute(
+                        f"""
+                        SELECT
+                            'APPOINTMENT' AS row_type,
+                            ap.id AS row_id,
+                            u.name AS phlebo_name,
+                            p.full_name AS patient_name,
+                            p.contact_mobile
+                        FROM hhome_collection_booking_appointment ap
+                        INNER JOIN users u ON u.id = ap.assigned_phlebotomist_id
+                        INNER JOIN hhome_collection_booking_patient bp ON bp.booking_id = ap.booking_id
+                        INNER JOIN hpatient_master p ON p.id = bp.patient_id
+                        WHERE ap.id IN ({",".join(["%s"] * len(valid_appointment_ids))})
+                        ORDER BY ap.id
+                        """,
+                        list(valid_appointment_ids),
+                    )
+                    msg_rows.extend(cur.fetchall() or [])
 
             preview = []
             by_booking = {}
             for r in msg_rows:
-                bid = int(r.get("booking_id") or 0)
-                if bid <= 0:
+                row_type = self._norm_code(r.get("row_type")).upper() or "BOOKING"
+                row_id = int(r.get("row_id") or 0)
+                if row_id <= 0:
                     continue
+                key = f"{row_type[0]}-{row_id}"
                 by_booking.setdefault(
-                    bid,
+                    key,
                     {
-                        "booking_id": bid,
+                        "row_type": row_type,
+                        "row_id": row_id,
                         "phlebo_name": self._norm_code(r.get("phlebo_name")),
                         "recipients": set(),
                         "patient_names": [],
@@ -1885,10 +4074,10 @@ class HHomeCollectionCore:
                 )
                 pname = self._norm_code(r.get("patient_name"))
                 pmob = self._norm_code(r.get("contact_mobile"))
-                if pname and pname not in by_booking[bid]["patient_names"]:
-                    by_booking[bid]["patient_names"].append(pname)
+                if pname and pname not in by_booking[key]["patient_names"]:
+                    by_booking[key]["patient_names"].append(pname)
                 if pmob:
-                    by_booking[bid]["recipients"].add(pmob)
+                    by_booking[key]["recipients"].add(pmob)
 
             for _, item in sorted(by_booking.items(), key=lambda x: x[0]):
                 patient_line = ", ".join(item["patient_names"]) if item["patient_names"] else "Patient"
@@ -1899,78 +4088,89 @@ class HHomeCollectionCore:
                 ]
                 preview.append(
                     {
-                        "booking_id": item["booking_id"],
+                        "row_type": item["row_type"],
+                        "row_id": item["row_id"],
                         "phlebo_name": item["phlebo_name"],
                         "targets": sorted(item["recipients"]),
                         "message_text": "\n".join(lines),
                     }
                 )
 
-            # Best-effort WhatsApp send using existing project helper.
+            # ========== WHATSAPP SEND (CONTROLLED BY FLAG) ==========
             sent = 0
             failed = 0
             send_results = []
-            try:
-                from app.alerts import send_whatsapp_to_number
-            except Exception:
-                send_whatsapp_to_number = None
 
-            if send_whatsapp_to_number:
-                for msg in preview:
-                    text = self._norm_code(msg.get("message_text"))
-                    targets = msg.get("targets") or []
-                    if not text or not targets:
-                        failed += 1
-                        send_results.append(
-                            {
-                                "booking_id": msg.get("booking_id"),
-                                "target": "",
-                                "status_code": 0,
-                                "response": "Missing target(s) or message",
-                            }
-                        )
-                        continue
-                    for raw_target in targets:
-                        target = self._normalize_wa_target(raw_target)
-                        if not target:
+            if self.WHATSAPP_ENABLED:
+                try:
+                    from app.alerts import send_whatsapp_to_number
+                except Exception:
+                    send_whatsapp_to_number = None
+
+                if send_whatsapp_to_number:
+                    for msg in preview:
+                        text = self._norm_code(msg.get("message_text"))
+                        targets = msg.get("targets") or []
+                        if not text or not targets:
                             failed += 1
                             send_results.append(
                                 {
-                                    "booking_id": msg.get("booking_id"),
-                                    "target": raw_target,
+                                    "row_type": msg.get("row_type"),
+                                    "row_id": msg.get("row_id"),
+                                    "target": "",
                                     "status_code": 0,
-                                    "response": "Invalid target mobile",
+                                    "response": "Missing target(s) or message",
                                 }
                             )
                             continue
-                        try:
-                            status_code, response_text = send_whatsapp_to_number(target, text)
-                            ok = int(status_code) in (200, 201)
-                            sent += 1 if ok else 0
-                            failed += 0 if ok else 1
-                            send_results.append(
-                                {
-                                    "booking_id": msg.get("booking_id"),
-                                    "target": target,
-                                    "status_code": status_code,
-                                    "response": response_text,
-                                }
-                            )
-                        except Exception as exc:
-                            failed += 1
-                            send_results.append(
-                                {
-                                    "booking_id": msg.get("booking_id"),
-                                    "target": target,
-                                    "status_code": 500,
-                                    "response": str(exc),
-                                }
-                            )
+                        for raw_target in targets:
+                            target = self._normalize_wa_target(raw_target)
+                            if not target:
+                                failed += 1
+                                send_results.append(
+                                    {
+                                        "row_type": msg.get("row_type"),
+                                        "row_id": msg.get("row_id"),
+                                        "target": raw_target,
+                                        "status_code": 0,
+                                        "response": "Invalid target mobile",
+                                    }
+                                )
+                                continue
+                            try:
+                                status_code, response_text = send_whatsapp_to_number(target, text)
+                                ok = int(status_code) in (200, 201)
+                                sent += 1 if ok else 0
+                                failed += 0 if ok else 1
+                                send_results.append(
+                                    {
+                                        "row_type": msg.get("row_type"),
+                                        "row_id": msg.get("row_id"),
+                                        "target": target,
+                                        "status_code": status_code,
+                                        "response": response_text,
+                                    }
+                                )
+                            except Exception as exc:
+                                failed += 1
+                                send_results.append(
+                                    {
+                                        "row_type": msg.get("row_type"),
+                                        "row_id": msg.get("row_id"),
+                                        "target": target,
+                                        "status_code": 500,
+                                        "response": str(exc),
+                                    }
+                                )
 
+            conn.commit()
+            updated_count = len(valid_booking_ids) + len(valid_appointment_ids)
             return {
                 "ok": True,
-                "updated_count": len(valid_ids),
-                "skipped_assigned_count": max(len(booking_ids) - len(valid_ids), 0),
+                "updated_count": updated_count,
+                "updated_booking_count": len(valid_booking_ids),
+                "updated_appointment_count": len(valid_appointment_ids),
+                "skipped_assigned_count": max(len(normalized) - updated_count, 0),
                 "messages_preview": preview,
                 "send_summary": {"sent": sent, "failed": failed},
                 "send_results": send_results,
@@ -1980,5 +4180,7 @@ class HHomeCollectionCore:
             return {"ok": False, "message": str(exc)}
         finally:
             conn.close()
+
+
 
 

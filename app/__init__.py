@@ -36,6 +36,7 @@ def create_app():
     from app.routes.venepunchre import venepunchre_bp
     from app.routes.hhome_collection import hhome_collection_bp, service as hhome_collection_service
     from app.routes.hhome_collection_dashboard import hhome_collection_dashboard_bp
+    from app.routes.phlebo_summary import phlebo_summary_bp
     from app.routes.concentform import concentform_bp
     
 
@@ -61,6 +62,7 @@ def create_app():
     app.register_blueprint(venepunchre_bp)
     app.register_blueprint(hhome_collection_bp)
     app.register_blueprint(hhome_collection_dashboard_bp)
+    app.register_blueprint(phlebo_summary_bp)
     app.register_blueprint(concentform_bp)
 
     # Warm once on server start: panel/company + GST catalog for fast HC test booking.

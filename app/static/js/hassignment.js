@@ -363,18 +363,21 @@
   function commitAssignments() {
     if (state.isCommitting) return;
 
-    const activeRoutes = state.routeOrder.filter(r => countRoute(r) > 0);
-    const pendingRoutes = activeRoutes.filter(r => !state.routeAssignee[r]);
-    if (pendingRoutes.length) {
-      showFeedbackToast('warning', `Please assign phlebotomist for all routes. Pending: ${pendingRoutes.join(', ')}`);
+    const assignments = state.bookings
+      .filter(b => !!state.routeAssignee[b.route_name])
+      .map(b => ({
+        row_type: b.row_type || (Number(b.appointment_id || 0) > 0 ? 'APPOINTMENT' : 'BOOKING'),
+        booking_id: b.booking_id,
+        appointment_id: Number(b.appointment_id || 0),
+        parent_booking_id: Number(b.parent_booking_id || 0),
+        grouped_route: b.route_name,
+        assigned_user_id: state.routeAssignee[b.route_name]
+      }));
+
+    if (!assignments.length) {
+      showFeedbackToast('warning', 'Please assign at least one route first.');
       return;
     }
-
-    const assignments = state.bookings.map(b => ({
-      booking_id: b.booking_id,
-      grouped_route: b.route_name,
-      assigned_user_id: state.routeAssignee[b.route_name]
-    }));
 
     setCommitLoading(true);
     $.ajax({
@@ -416,3 +419,5 @@
 
   init();
 })();
+
+

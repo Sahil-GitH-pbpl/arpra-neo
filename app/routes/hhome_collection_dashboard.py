@@ -65,8 +65,14 @@ def phlebotomists():
 def assign_phlebotomist():
     payload = request.get_json(silent=True) or {}
     booking_id = int(payload.get("booking_id", 0))
+    appointment_id = int(payload.get("appointment_id", 0))
     user_id = int(payload.get("user_id", 0))
-    result = service.assign_phlebotomist(booking_id, user_id, actor_user_id=session.get("user_id"))
+    result = service.assign_phlebotomist(
+        booking_id,
+        user_id,
+        actor_user_id=session.get("user_id"),
+        appointment_id=appointment_id,
+    )
     status = 200 if result["ok"] else 400
     return jsonify(result), status
 
@@ -75,8 +81,53 @@ def assign_phlebotomist():
 def cancel_booking():
     payload = request.get_json(silent=True) or {}
     booking_id = int(payload.get("booking_id", 0))
-    result = service.cancel_booking(booking_id, actor_user_id=session.get("user_id"))
+    appointment_id = int(payload.get("appointment_id", 0))
+    reason_text = (payload.get("reason_text") or "").strip()
+    result = service.cancel_booking(
+        booking_id,
+        reason_text=reason_text,
+        actor_user_id=session.get("user_id"),
+        appointment_id=appointment_id,
+    )
     status = 200 if result["ok"] else 400
     return jsonify(result), status
 
 
+@hhome_collection_dashboard_bp.post("/hhome-collection/book-appointment-init")
+def book_appointment_init():
+    payload = request.get_json(silent=True) or {}
+    booking_id = int(payload.get("booking_id", 0))
+    reason_text = (payload.get("reason_text") or "").strip()
+    result = service.begin_followup_appointment_session(
+        booking_id=booking_id,
+        reason_text=reason_text,
+        session=session,
+        actor_user_id=session.get("user_id"),
+    )
+    status = 200 if result.get("ok") else 400
+    return jsonify(result), status
+
+
+@hhome_collection_dashboard_bp.post("/hhome-collection/modify-init")
+def modify_init():
+    payload = request.get_json(silent=True) or {}
+    booking_id = int(payload.get("booking_id", 0))
+    appointment_id = int(payload.get("appointment_id", 0))
+    reason_text = (payload.get("reason_text") or "").strip()
+    if appointment_id > 0:
+        result = service.begin_modify_appointment_session(
+            booking_id=booking_id,
+            appointment_id=appointment_id,
+            reason_text=reason_text,
+            session=session,
+            actor_user_id=session.get("user_id"),
+        )
+    else:
+        result = service.begin_modify_booking_session(
+            booking_id=booking_id,
+            reason_text=reason_text,
+            session=session,
+            actor_user_id=session.get("user_id"),
+        )
+    status = 200 if result.get("ok") else 400
+    return jsonify(result), status
