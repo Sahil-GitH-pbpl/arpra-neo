@@ -68,6 +68,7 @@ def create_app():
     # Warm once on server start: panel/company + GST catalog for fast HC test booking.
     try:
         hhome_collection_service.preload_panel_catalog()
+        app.logger.info("[hhome_collection preload] in-memory catalog ready")
     except Exception as exc:
         app.logger.error(f"[hhome_collection preload] failed: {exc}")
 

@@ -66,6 +66,7 @@ def _build_lead_message(
     tags: str,
     num_patients: str,
     remarks: str,
+    
     created_by: str
 ) -> str:
     """

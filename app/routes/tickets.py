@@ -251,6 +251,7 @@ def tickets_create_unified():
             whatsapp_opt_in = 0
 
         # Database insertion
+        
         cols = [
             "source", "country_code", "mobile_number",
             "patient_name", "patient_labmate_id",

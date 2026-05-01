@@ -68,6 +68,10 @@
     .tile-breached{ background:var(--breached-bg); border-color:var(--breached-br); }
 
     .hidden{ display:none !important; }
+    .counters,
+    #menu-inline-stats{
+      display:none !important;
+    }
 
     @keyframes throb {
       0%   { transform:scale(1); }
@@ -188,6 +192,10 @@
     .submenu a:hover{
       color:#fff; background:linear-gradient(90deg, var(--brand), #3a236b); border-radius: 8px;
     }
+    .hc-only-menu .menu-info{display:none !important;}
+    .hc-only-menu .mega-panel .menu-section{display:none !important;}
+    .hc-only-menu .mega-panel #hc-menu-section,.hc-only-menu .mega-panel #leads-menu-section{display:block !important;}
+    .hc-only-menu .lead-mobile-btn{display:none !important;}
     .control-stack{
       display:flex; flex-direction:column; justify-content:flex-start;
       align-items:flex-end; gap:10px;
@@ -427,7 +435,7 @@
       <div class="counters"></div>
       {% endif %}
 
-      <nav class="right" aria-label="Primary">
+      <nav class="right hc-only-menu" aria-label="Primary">
         {% if is_allowed_user %}
         <a href="{{ url_for('dashboard.lead_shell') }}" class="lead-mobile-btn" title="New Lead Form">
           <span class="icon">📝</span>
@@ -473,9 +481,9 @@
               </div>
 
               {% if is_allowed_user %}
-              <div class="menu-section has-sub">
+              <div class="menu-section has-sub" id="leads-menu-section">
                 <span class="section-label" tabindex="0">
-                  <span class="icon">👥</span> Leads
+                  <span class="icon">&#128101;</span> Leads
                 </span>
                 <div class="submenu">
                   <a href="{{ url_for('dashboard.lead_shell') }}"><span class="icon">📝</span> New Lead (Form)</a>
@@ -485,13 +493,15 @@
                 </div>
               </div>
 
-              <div class="menu-section has-sub">
+              <div class="menu-section has-sub" id="hc-menu-section">
                 <span class="section-label" tabindex="0">
                   <span class="icon">&#127968;</span> H Collection
                 </span>
                 <div class="submenu">
                   <a href="{{ url_for('hhome_collection.wizard') }}"><span class="icon"><strong>+</strong></span> Add Booking</a>
                   <a href="{{ url_for('hhome_collection_dashboard.dashboard') }}"><span class="icon">&#128196;</span> All Booking</a>
+                  <a href="{{ url_for('phlebo_summary.page') }}"><span class="icon">&#128203;</span> Phlebo Summary</a>
+                  <a href="{{ url_for('hhome_collection.panel_test_master_page') }}"><span class="icon">&#128202;</span> Panel Co &amp; Test Mst</a>
                 </div>
               </div>
 
@@ -551,7 +561,10 @@
   <div class="popwrap" id="popwrap"></div>
 
 <script>
+    const ENABLE_HEADER_COUNTERS = false;
+
     function setTile(btnId, badgeId, count){
+      if(!ENABLE_HEADER_COUNTERS) return;
       const tile = document.getElementById(btnId);
       const badge = document.getElementById(badgeId);
       if(!tile || !badge) return;
@@ -569,6 +582,7 @@
     }
 
     function updateMenuCounters(assigned, tagged){
+      if(!ENABLE_HEADER_COUNTERS) return;
       const el = document.getElementById('menu-inline-stats');
       if(!el) return;
       const assignedNum = Number(assigned || 0);
@@ -582,6 +596,7 @@
     }
 
     async function refreshCounters() {
+      if(!ENABLE_HEADER_COUNTERS) return;
       try {
         const res = await fetch("{{ url_for('base.tickets_counters') }}", {
           credentials: 'same-origin',
@@ -602,6 +617,7 @@
     }
 
     async function refreshFailedMessages(){
+      if(!ENABLE_HEADER_COUNTERS) return;
       try{
         const res = await fetch("{{ url_for('base.tickets_failed_messages') }}", {
           credentials: 'same-origin',
@@ -614,6 +630,7 @@
     }
 
     async function refreshComplaintCount(){
+      if(!ENABLE_HEADER_COUNTERS) return;
       try{
         const res = await fetch("{{ url_for('base.tickets_complaint_count') }}", {
           credentials: 'same-origin',
@@ -636,9 +653,11 @@
       });
     })();
 
-    refreshCounters();
-    refreshFailedMessages();
-    refreshComplaintCount();
+    if(ENABLE_HEADER_COUNTERS){
+      refreshCounters();
+      refreshFailedMessages();
+      refreshComplaintCount();
+    }
 
     (function setupMenuToggle(){
       const menu = document.getElementById('main-nav-menu');
@@ -745,6 +764,7 @@
     })();
 </script>
 
+<!--
 <script>
   window.CCE_CONTEXT = {
     WS_URL: "{{ GLOBAL_WS_URL|e }}",
@@ -755,6 +775,9 @@
 </script>
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/cce_popups.js') }}"></script>
+-->
 </body>
 </html>
+
+
 

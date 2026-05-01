@@ -16,6 +16,10 @@
   const toastBodyEl = document.getElementById('asg-feedback-toast-body');
   const feedbackToast = toastEl ? new bootstrap.Toast(toastEl) : null;
   const commitBtnDefaultHtml = commitBtn ? commitBtn.innerHTML : 'Assign All Bookings';
+  const detailPanelEl = document.getElementById('asg-detail-panel');
+  const detailBodyEl = document.getElementById('asg-detail-body');
+  const detailCloseEl = document.getElementById('asg-detail-close');
+  const hoverPanelEl = document.getElementById('asg-hover-panel');
 
   const state = {
     routes: [],
@@ -79,6 +83,30 @@
       .replaceAll('>', '&gt;')
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
+  }
+
+  function tbsLabelFromCodes(csv) {
+    const map = {
+      '1': 'Test confirmed and booked',
+      '2': 'Prescription attached but test not booked',
+      '3': 'No test information: ask to patient for tests',
+      '4': 'Incompleted test, phlebo verification pending to confirm and book'
+    };
+    const parts = String(csv || '').split(',').map(x => String(x || '').trim()).filter(Boolean);
+    const labels = Array.from(new Set(parts.map(x => map[x] || x).filter(Boolean)));
+    return labels.join(', ') || '-';
+  }
+
+  function buildHoverText(b) {
+    return [
+      `Test Booking Status: ${tbsLabelFromCodes(b.test_booking_status_codes)}`,
+      `Patient Tags: ${String(b.patient_tags || '-').trim() || '-'}`,
+      `Booking Tags: ${String(b.booking_tags || '-').trim() || '-'}`,
+      `Panel Company: ${String(b.panel_companies || '-').trim() || '-'}`,
+      `Referred By: ${String(b.referred_by || '-').trim() || '-'}`,
+      `Internal Ref By: ${String(b.internal_referred_by || '-').trim() || '-'}`,
+      `Total Value: ${Number(b.total_amount || 0).toFixed(2).replace(/\.00$/, '')}`
+    ].join('\n');
   }
 
   function defaultTomorrow() {
@@ -148,8 +176,12 @@
             const callerMobileDisplay = callerMobile ? `(${callerMobile})` : '(-)';
             const patientCount = Number(b.patient_count || 0);
             const extraCount = patientCount > 1 ? (patientCount - 1) : 0;
+            const detailBookingId = String(b.row_type || '').toUpperCase() === 'APPOINTMENT'
+              ? Number(b.parent_booking_id || 0)
+              : Number(b.booking_id || 0);
+            const hoverText = esc(buildHoverText(b));
             html += `
-              <div class="asg-booking" draggable="true" data-booking-id="${b.booking_id}">
+              <div class="asg-booking" draggable="true" data-booking-id="${b.booking_id}" data-detail-booking-id="${detailBookingId}" data-hover-text="${hoverText}">
                 ${extraCount > 0 ? `<div class="asg-extra-pill">+${extraCount}</div>` : ''}
                 <div class="asg-baddr">${place || '-'}</div>
                 <div class="asg-bmob">${callerMobileDisplay}</div>
@@ -193,6 +225,51 @@
       card.addEventListener('dragend', () => {
         state.draggedBookingId = null;
         tableEl.querySelectorAll('.asg-slot-cell').forEach(c => c.classList.remove('drop-on'));
+      });
+      card.addEventListener('mouseenter', () => {
+        if (!hoverPanelEl) return;
+        hoverPanelEl.textContent = String(card.dataset.hoverText || '').replaceAll('\\n', '\n');
+        const rect = card.getBoundingClientRect();
+        hoverPanelEl.style.left = `${Math.max(8, Math.min(window.innerWidth - 320, rect.left + 8))}px`;
+        hoverPanelEl.style.top = `${Math.min(window.innerHeight - 120, rect.bottom + 8)}px`;
+        hoverPanelEl.classList.remove('d-none');
+      });
+      card.addEventListener('mouseleave', () => {
+        if (!hoverPanelEl) return;
+        hoverPanelEl.classList.add('d-none');
+      });
+      card.addEventListener('dblclick', () => {
+        const detailBookingId = Number(card.dataset.detailBookingId || 0);
+        if (!detailBookingId || !detailPanelEl || !detailBodyEl) return;
+        detailPanelEl.classList.remove('d-none');
+        detailBodyEl.innerHTML = '<div class="text-muted">Loading...</div>';
+        $.get(`/hhome-collection/booking/${detailBookingId}`, function (res) {
+          const bk = res?.booking || {};
+          const addr = bk || {};
+          const patientTags = Array.from(new Set((bk?.patients || []).map(p => String(p.tag || '').trim()).filter(Boolean)));
+          const bookingTags = String(bk?.booking_tags || '').split(',').map(x => String(x || '').trim()).filter(Boolean);
+          const patientTagHtml = patientTags.length
+            ? patientTags.map(t => `<span class="asg-tag-chip asg-tag-chip-patient">${esc(t)}</span>`).join(' ')
+            : '-';
+          const bookingTagHtml = bookingTags.length
+            ? bookingTags.map(t => `<span class="asg-tag-chip asg-tag-chip-booking">${esc(t)}</span>`).join(' ')
+            : '-';
+          detailBodyEl.innerHTML = `
+            <div><strong>City:</strong> ${esc(addr.city || '-')}</div>
+            <div><strong>Colony Name:</strong> ${esc(addr.colony_name_snapshot || addr.colony_name || '-')}</div>
+            <div><strong>Pin Code:</strong> ${esc(addr.pincode || '-')}</div>
+            <div class="asg-tag-row mt-1">
+              <span class="asg-tag-row-label">Patient Tag:</span>
+              <span>${patientTagHtml}</span>
+            </div>
+            <div class="asg-tag-row">
+              <span class="asg-tag-row-label">Booking Tag:</span>
+              <span>${bookingTagHtml}</span>
+            </div>
+          `;
+        }).fail(function (xhr) {
+          detailBodyEl.innerHTML = `<div class="text-danger">${esc(xhr?.responseJSON?.message || 'Unable to load details')}</div>`;
+        });
       });
     });
 
@@ -414,10 +491,11 @@
     bindBottomScrollerSync();
     if (reloadBtn) reloadBtn.addEventListener('click', loadPlanner);
     if (commitBtn) commitBtn.addEventListener('click', commitAssignments);
+    if (detailCloseEl && detailPanelEl) {
+      detailCloseEl.addEventListener('click', () => detailPanelEl.classList.add('d-none'));
+    }
     loadPlanner();
   }
 
   init();
 })();
-
-

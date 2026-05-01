@@ -365,6 +365,8 @@
         }
     }
 
+    const ENABLE_CCE_DASHBOARD_STATS = false;
+
     async function loadLeaderboardData({ startDate = '', endDate = '' } = {}) {
         const params = new URLSearchParams();
         if (startDate && endDate) {
@@ -374,10 +376,16 @@
 
         const queryString = params.toString();
         const url = queryString ? `/api/cce-dashboard/all-stats?${queryString}` : '/api/cce-dashboard/all-stats';
+
+        if (!ENABLE_CCE_DASHBOARD_STATS) {
+            showErrorState('CCE dashboard stats paused');
+            return;
+        }
         
         try {
             showLoadingState(true);
 
+            // const response = await fetch(url);
             const response = await fetch(url);
 
             if (response.ok) {

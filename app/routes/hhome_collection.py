@@ -18,6 +18,11 @@ def wizard():
     return render_template("hhome_collection/hwizard.html")
 
 
+@hhome_collection_bp.get("/hhome-collection/panel-test-master")
+def panel_test_master_page():
+    return render_template("hhome_collection/hpanel_test_master.html")
+
+
 @hhome_collection_bp.get("/hhome-collection/step/<int:step>")
 def load_step(step: int):
     templates = {
@@ -56,6 +61,7 @@ def search_caller():
                 "reference_addresses": reference_addresses,
                 "selected_patients": selected_enriched,
                 "addresses": addresses,
+                "caller_history": service.get_caller_history_summary(caller["id"]),
                 "selected_address_id": session.get("hselected_address_id"),
             }
         )
@@ -71,6 +77,7 @@ def search_caller():
             "reference_addresses": [],
             "selected_patients": [],
             "addresses": [],
+            "caller_history": service.get_caller_history_summary(0),
             "selected_address_id": None,
         }
     )
@@ -94,8 +101,22 @@ def linked_patients():
 def current_caller():
     caller_id = session.get("hcaller_id")
     if not caller_id:
-        return jsonify({"ok": True, "caller": None})
-    return jsonify({"ok": True, "caller": service.get_caller(caller_id)})
+        return jsonify({"ok": True, "caller": None, "caller_history": service.get_caller_history_summary(0)})
+    return jsonify(
+        {
+            "ok": True,
+            "caller": service.get_caller(caller_id),
+            "caller_history": service.get_caller_history_summary(caller_id),
+        }
+    )
+
+
+@hhome_collection_bp.get("/hhome-collection/caller-history-booking")
+def caller_history_booking():
+    booking_id = request.args.get("booking_id", type=int) or 0
+    result = service.get_caller_history_booking_detail(booking_id)
+    status = 200 if result.get("ok") else 400
+    return jsonify(result), status
 
 
 @hhome_collection_bp.post("/hhome-collection/select-patient")
@@ -381,6 +402,7 @@ def internal_ref_users():
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 500
 
+
 @hhome_collection_bp.get("/hhome-collection/panel-companies")
 def panel_companies():
     try:
@@ -432,6 +454,27 @@ def panel_tests():
         return jsonify({"ok": False, "message": str(exc)}), 500
 
 
+@hhome_collection_bp.get("/hhome-collection/panel-companies-initial")
+def panel_companies_initial():
+    try:
+        rows = service.panel_companies_initial(limit=request.args.get("limit", default=5, type=int))
+        return jsonify({"ok": True, "items": rows})
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@hhome_collection_bp.get("/hhome-collection/panel-tests-by-company")
+def panel_tests_by_company():
+    try:
+        comp_cat_id = request.args.get("comp_cat_id")
+        if not comp_cat_id:
+            return jsonify({"ok": False, "message": "comp_cat_id is required"}), 400
+        rows = service.panel_tests_by_company(comp_cat_id)
+        return jsonify({"ok": True, "tests": rows})
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
 @hhome_collection_bp.get("/hhome-collection/panel-test-search")
 def panel_test_search():
     try:
@@ -469,10 +512,15 @@ def test_specimen_catalog():
 
 @hhome_collection_bp.get("/hhome-collection/modify-context")
 def modify_context():
+    tag_options = {
+        "patient": [x.get("tag_name") for x in service.list_tag_master("patient") if (x or {}).get("tag_name")],
+        "permanent": [x.get("tag_name") for x in service.list_tag_master("permanent") if (x or {}).get("tag_name")],
+        "transactional": [x.get("tag_name") for x in service.list_tag_master("transactional") if (x or {}).get("tag_name")],
+    }
     ctx = session.get("hmodify_context") or {}
     if not ctx:
-        return jsonify({"ok": True, "active": False})
-    return jsonify({"ok": True, "active": True, "context": ctx})
+        return jsonify({"ok": True, "active": False, "tag_options": tag_options})
+    return jsonify({"ok": True, "active": True, "context": ctx, "tag_options": tag_options})
 
 
 @hhome_collection_bp.post("/hhome-collection/modify-booking")

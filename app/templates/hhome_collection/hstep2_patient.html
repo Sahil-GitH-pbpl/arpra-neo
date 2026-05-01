@@ -1,24 +1,28 @@
 <div id="step2-wrap">
   <h5>Step 2 - Appointment Booking</h5>
   <div class="row g-2">
-    <div class="col-md-5"><label class="form-label">Preferred Visit Date *</label><input type="date" id="b-date" class="form-control"></div>
+    <div class="col-md-5"><label class="form-label">Preferred Visit Date *</label><input type="date" id="b-date" class="form-control" required></div>
     <div class="col-md-5">
       <label class="form-label">Schedule Time *</label>
-      <input type="text" id="b-slot" class="form-control" placeholder="Select from Slots planner" readonly>
+      <input type="text" id="b-slot" class="form-control" placeholder="Select from Slots planner" readonly required>
     </div>
     <div class="col-md-2 d-grid">
       <label class="form-label d-none d-md-block">&nbsp;</label>
       <button class="btn btn-dark" id="btn-open-slots">Slots</button>
     </div>
-    <div class="col-md-6 tb-panel-wrap">
+    <div class="col-md-4 tb-panel-wrap">
       <label class="form-label">Referred By</label>
       <input type="text" id="ap-referred-by" class="form-control" placeholder="Type 2 letters to search">
       <div id="ap-referred-by-suggest" class="tb-panel-suggest d-none"></div>
     </div>
-        <div class="col-md-6 tb-panel-wrap">
+    <div class="col-md-4 tb-panel-wrap">
       <label class="form-label">Internal Referenced By</label>
       <input type="text" id="ap-internal-ref" class="form-control" placeholder="Type 2 letters to search">
       <div id="ap-internal-ref-suggest" class="tb-panel-suggest d-none"></div>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Lead ID</label>
+      <input type="text" id="ap-lead-id" class="form-control" placeholder="Enter lead id">
     </div>
     <div class="col-12 d-none"><label class="form-label">Remarks</label><textarea id="b-remarks" class="form-control"></textarea></div>
   </div>
@@ -46,11 +50,7 @@
             <label class="form-label">Selected Route</label>
             <input type="text" id="slot-selected-route" class="form-control" readonly>
           </div>
-          <div class="col-md-2 d-grid">
-            <label class="form-label d-none d-md-block">&nbsp;</label>
-            <button class="btn btn-primary" id="btn-slot-grid-search">Search</button>
-          </div>
-          <div class="col-md-4 text-md-end small text-muted" id="slot-grid-meta"></div>
+          <div class="col-md-6 text-md-end small text-muted" id="slot-grid-meta"></div>
         </div>
         <div id="slot-grid-wrap" class="slot-grid-wrap">
           <div class="text-muted p-2">Loading...</div>

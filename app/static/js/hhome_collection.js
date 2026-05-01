@@ -1,13 +1,24 @@
 let currentStep = 1;
 let linkedPatientsCache = [];
+let referenceAddressesCache = [];
+let callerHistoryCache = null;
 let hasCallerContext = false;
 let colonyRequestSeq = 0;
 let wizardData = {
   searchedMobile: '',
   appointment: {},
-  testsBilling: {}
+  testsBilling: {},
+  prescriptionUploads: {},
+  modify: {}
 };
 let selectedPatientTags = [];
+let selectedPermanentTags = [];
+let selectedBookingTags = [];
+let tagOptions = {
+  patient: [],
+  permanent: [],
+  transactional: []
+};
 let editingPatientId = null;
 let editingAddressId = null;
 let slotPlannerModal = null;
@@ -16,32 +27,88 @@ let slotSelectedRoute = '';
 let summaryRequestSeq = 0;
 let testSpecimenCatalog = null;
 let testSpecimenCatalogPromise = null;
+let panelTestSearchTimer = null;
+let panelTestSearchQuery = '';
+let panelTestSearchSeq = 0;
+let phleboTagModal = null;
+let phleboTagMode = '';
+let phleboTagSelected = null;
 let activePanelPicker = {
   patientId: null,
+  panelIndex: 0,
   compCatId: null,
   billingName: '',
   selectedGcode: '',
   selectedScode: '',
   tempSelected: {}
 };
+const PATIENT_TBS_OPTIONS = [
+  { code: 1, label: 'Test confirmed and booked' },
+  { code: 2, label: 'Prescription attached but test not booked' },
+  { code: 3, label: 'No test information: ask to patient for tests' },
+  { code: 4, label: 'Incompleted test, phlebo verification pending to confirm and book' }
+];
 
-const titleGenderMap = {
-  Mr: 'Male',
-  Mrs: 'Female',
-  Ms: 'Female',
-  Miss: 'Female',
-  Master: 'Male',
-  Other: 'Other'
-};
+const TITLE_MASTER = [
+  { id: 1, title: 'Mr.', gender: 'Male' },
+  { id: 2, title: 'Mrs.', gender: 'Female' },
+  { id: 3, title: 'Dr', gender: 'Male' },
+  { id: 4, title: 'Dr (Ms)', gender: 'Female' },
+  { id: 5, title: 'Master', gender: 'Male' },
+  { id: 6, title: 'Baby', gender: 'Female' },
+  { id: 7, title: 'Daughter of', gender: 'Female' },
+  { id: 8, title: 'Son Of', gender: 'Male' },
+  { id: 9, title: 'Miss', gender: 'Female' },
+  { id: 11, title: 'MS.', gender: 'Female' },
+  { id: 12, title: 'Mr', gender: 'Male' },
+  { id: 13, title: 'MST.', gender: 'Male' },
+  { id: 14, title: 'Mrs', gender: 'Female' },
+  { id: 15, title: 'Mst', gender: 'Male' },
+  { id: 16, title: 'Ms', gender: 'Female' },
+  { id: 18, title: 'Care Of', gender: 'Other' },
+  { id: 19, title: 'CARE', gender: 'Other' },
+  { id: 20, title: 'PROF.', gender: 'Male' },
+  { id: 21, title: 'CAPT.', gender: 'Male' },
+  { id: 23, title: 'Prof', gender: 'Male' },
+  { id: 24, title: 'COL.', gender: 'Male' },
+  { id: 25, title: 'BRIG.', gender: 'Male' },
+  { id: 26, title: 'MAJ.', gender: 'Male' },
+  { id: 27, title: 'MAJ.GEN', gender: 'Male' },
+  { id: 28, title: 'JUSTIC', gender: 'Male' },
+  { id: 29, title: 'DSD', gender: 'Other' }
+];
+
+const titleGenderMap = TITLE_MASTER.reduce((acc, row) => {
+  acc[row.title] = row.gender;
+  return acc;
+}, {});
+
+function renderPatientTitleOptions(selectedTitle = '') {
+  const $title = $('#p-title');
+  if (!$title.length) return;
+
+  const normalizedSelected = String(selectedTitle || '').trim();
+  const options = ['<option value="">Select</option>']
+    .concat(TITLE_MASTER.map((row) => {
+      const title = String(row.title || '').trim();
+      const selected = title === normalizedSelected ? ' selected' : '';
+      return `<option value="${escHtml(title)}"${selected}>${escHtml(title)}</option>`;
+    }))
+    .join('');
+
+  $title.html(options);
+}
 
 function setLayoutForWizard() {
   $('#wizard-right-col').removeClass('d-none');
   $('#wizard-left-col').removeClass('col-lg-12').addClass('col-lg-9');
+  $('#wizard-top-tags').removeClass('d-none');
 }
 
 function setLayoutForSuccess() {
   $('#wizard-right-col').addClass('d-none');
   $('#wizard-left-col').removeClass('col-lg-9').addClass('col-lg-12');
+  $('#wizard-top-tags').addClass('d-none');
 }
 
 function setStep(step) {
@@ -58,6 +125,7 @@ function setStep(step) {
     if (step === 4) renderReview();
   });
 }
+
 
 function showAlert(target, type, text) {
   $(target).html(`<div class="alert alert-${type} hc-alert">${text}</div>`);
@@ -100,15 +168,55 @@ function chargeModeOptions(codeRaw) {
   return ['C', 'P', 'F'].filter((x) => code.includes(x));
 }
 
-function renderChargeModeControl(patientId, billing) {
+function panelDomKey(patientId, panelIndex) {
+  return `${String(patientId || '').replace(/[^A-Za-z0-9_-]/g, '_')}_${Number(panelIndex || 0)}`;
+}
+
+function normalizePanelSection(section) {
+  const s = section && typeof section === 'object' ? section : {};
+  s.panel = s.panel || null;
+  s.billing = s.billing || null;
+  s.selected_tests = Array.isArray(s.selected_tests) ? s.selected_tests : [];
+  return s;
+}
+
+function getPatientPanels(patientId) {
+  const tb = ensureTbObject(patientId);
+  return tb.panels;
+}
+
+function getPanelSection(patientId, panelIndex) {
+  const panels = getPatientPanels(patientId);
+  const idx = Number(panelIndex || 0);
+  while (panels.length <= idx) {
+    panels.push(normalizePanelSection({ panel: null, billing: null, selected_tests: [] }));
+  }
+  return normalizePanelSection(panels[idx]);
+}
+
+function syncPrimaryPanelFields(tb) {
+  const first = normalizePanelSection((tb.panels || [])[0] || {});
+  tb.panel = first.panel || null;
+  tb.billing = first.billing || null;
+  tb.selected_tests = first.selected_tests || [];
+}
+
+function renderChargeModeControl(patientId, panelIndex, billing) {
   const pid = String(patientId || '');
+  if (typeof panelIndex === 'object' && billing === undefined) {
+    billing = panelIndex;
+    panelIndex = 0;
+  }
+  const idx = Number(panelIndex || 0);
+  const key = panelDomKey(pid, idx);
   if (!pid || !billing) return;
 
-  const options = chargeModeOptions(billing.charge_mode_code || billing.charge_mode || '');
-  const $holder = $(`#tb-charge-mode-${pid}`);
+  const options = chargeModeOptions(billing.allowed_charge_mode_code || billing.charge_mode || billing.charge_mode_code || '');
+  const $holder = $(`#tb-charge-mode-${key}`);
   if (!$holder.length) return;
 
   if (!options.length) {
+    billing.selected_charge_mode = '';
     billing.charge_mode_code = '';
     $holder.text('-');
     return;
@@ -117,17 +225,18 @@ function renderChargeModeControl(patientId, billing) {
   if (options.length === 1) {
     const only = options[0];
     billing.charge_mode_code = only;
+    billing.selected_charge_mode = only;
     $holder.text(chargeModeLabel(only));
     return;
   }
 
   let selected = normalizeChargeModeCode(billing.selected_charge_mode || billing.charge_mode_code || billing.charge_mode || '');
   if (!options.includes(selected)) selected = options[0];
-  billing.selected_charge_mode = selected;
   billing.charge_mode_code = selected;
+  billing.selected_charge_mode = selected;
 
   const html = `
-    <select id="tb-charge-mode-select-${pid}" class="form-select form-select-sm tb-charge-mode-select" data-patient-id="${escHtml(pid)}">
+    <select id="tb-charge-mode-select-${key}" class="form-select form-select-sm tb-charge-mode-select" data-patient-id="${escHtml(pid)}" data-panel-index="${idx}">
       ${options.map((m) => `<option value="${escHtml(m)}" ${m === selected ? 'selected' : ''}>${escHtml(chargeModeLabel(m))}</option>`).join('')}
     </select>
   `;
@@ -159,30 +268,181 @@ function setCallerInlineChip(caller, notFoundText = '') {
     .html(`<span class="caller-pill"><strong>${caller.full_name}</strong> <small>(${caller.caller_code})</small></span>`);
 }
 
-function renderRightPanelState(patients) {
-  const list = patients || [];
-  linkedPatientsCache = list;
-  if (!list.length) {
-    $('#right-panel').html('<div class="text-muted">No linked patients yet</div>');
+function getLocalPrescriptionUploadCount(patientId) {
+  const pid = String(patientId || '');
+  const map = wizardData.prescriptionUploads || {};
+  const count = Number(map[pid] || 0);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+function renderReferenceAddressChip(r) {
+  const area = escHtml(r.area || '-');
+  const city = escHtml(r.city || '-');
+  const pincode = escHtml(r.pincode || '-');
+  const routename = escHtml(r.routename || '-');
+  const address = escHtml(r.address || '-');
+  return `
+    <div class="reference-address-card" data-reference-address-id="${r.id}">
+      <div class="reference-address-top">
+        <div class="reference-address-title">${escHtml([r.area, r.city].filter(Boolean).join(', ') || 'Reference Address')}</div>
+        <span class="reference-address-status">REF</span>
+      </div>
+      <div class="reference-address-meta">
+        <div><strong>Area:</strong> ${area}</div>
+        <div><strong>City:</strong> ${city}</div>
+        <div><strong>Pin code:</strong> ${pincode}</div>
+        <div><strong>Route name:</strong> ${routename}</div>
+      </div>
+      <div class="reference-address-line"><strong>Address:</strong> ${address}</div>
+      <div class="reference-address-actions">
+        <button type="button" class="btn btn-sm btn-outline-danger btn-finalize-reference-address" data-reference-address-id="${r.id}">
+          Finalize & Remove
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function formatHistoryDate(isoDate) {
+  const v = String(isoDate || '').trim();
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return v || '-';
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+function renderCallerHistoryPanel(history) {
+  const $panel = $('#caller-history-panel');
+  if (!$panel.length) return;
+
+  const h = history && typeof history === 'object' ? history : null;
+  const counts = h?.counts || {};
+  const rows = Array.isArray(h?.last_bookings) ? h.last_bookings : [];
+
+  if (!h) {
+    $panel.html('<div class="hc-h-inline-empty text-muted small">Search mobile to view history.</div>');
     return;
   }
-  const html = list.map(p => `
-    <div class="chip ${p.selected ? 'selected' : ''}" data-patient-id="${p.id}">
-      <div><strong>${p.full_name}</strong> (${p.age}) ${renderTagBadges(p.tag)}</div>
-      <small>${p.default_address || ''}</small>
+
+  const countsHtml = `
+    <div class="hc-h-counts">
+      <span class="hc-h-title">Caller History :</span>
+      <span class="hc-h-count">Linked Patient: <strong>${Number(counts.linked_patients || 0)}</strong></span>
+      <span class="hc-h-count">Total Booking: <strong>${Number(counts.total_bookings || 0)}</strong></span>
+      <span class="hc-h-count">Delayed: <strong>${Number(counts.delayed_bookings || 0)}</strong></span>
+      <span class="hc-h-count">Cancelled: <strong>${Number(counts.cancelled_bookings || 0)}</strong></span>
     </div>
-  `).join('');
-  $('#right-panel').html(html);
+  `;
+
+  if (!rows.length) {
+    $panel.html(`<div class="hc-h-inline">${countsHtml}</div>`);
+    return;
+  }
+
+  const chipsHtml = rows.map((b, idx) => {
+    const dt = escHtml(formatHistoryDate(b.preferred_visit_date));
+    const status = escHtml(b.status_label || '-');
+    const amount = escHtml(formatCharge(Number(b.total_amount || 0)));
+    const latestCls = idx === 0 || b.is_latest ? 'is-latest' : '';
+    return `
+      <button
+        type="button"
+        class="hc-h-chip-btn hc-history-chip-trigger ${latestCls}"
+        data-history-booking-id="${Number(b.booking_id || 0)}"
+      >
+        <span class="hc-h-chip-main">${dt}</span>
+        <span class="hc-h-chip-sep">|</span>
+        <span class="hc-h-chip-sub">${status}</span>
+        <span class="hc-h-chip-sep">|</span>
+        <span class="hc-h-chip-amt">${amount}</span>
+      </button>
+    `;
+  }).join('');
+
+  $panel.html(`<div class="hc-h-inline">${countsHtml}<div class="hc-h-list">${chipsHtml}</div><div id="hc-h-external-popup" class="hc-h-external-popup d-none"></div></div>`);
+}
+
+function bindCallerHistoryChipEvents() {
+  $(document).off('click.hcHistoryChip', '.hc-history-chip-trigger').on('click.hcHistoryChip', '.hc-history-chip-trigger', function (e) {
+    e.preventDefault();
+    const $btn = $(this);
+    const bid = Number($btn.data('history-booking-id') || 0);
+    if (bid <= 0) return;
+    const wasActive = $btn.hasClass('active');
+    if (wasActive) {
+      $btn.removeClass('active');
+      $('#hc-h-external-popup').addClass('d-none').empty();
+      return;
+    }
+    $('.hc-history-chip-trigger').removeClass('active');
+    $btn.addClass('active');
+    const $popup = $('#hc-h-external-popup');
+    $popup.html('<div class="text-light small">Loading details...</div>').removeClass('d-none');
+
+    $.get('/hhome-collection/caller-history-booking', { booking_id: bid })
+      .done(function (res) {
+        const b = res?.booking || {};
+        const patients = Array.isArray(b.patients) ? b.patients : [];
+        const patientsHtml = patients.length
+          ? patients.map((p) => `
+            <div class="hc-h-patient-card">
+              <div class="hc-h-patient-name">${escHtml(p.full_name || '-')}</div>
+              <div class="hc-h-patient-meta"><span>Gender:</span> <strong>${escHtml(p.gender || '-')}</strong></div>
+              <div class="hc-h-patient-meta"><span>Age:</span> <strong>${escHtml(p.age || '-')}</strong></div>
+              <div class="hc-h-patient-meta"><span>Tag:</span> <strong>${escHtml(p.tag || '-')}</strong></div>
+              <div class="hc-h-patient-meta"><span>Panel Company:</span> <strong>${escHtml(p.panel_company || '-')}</strong></div>
+              ${String(p.labmate_pid || '').trim() ? `<div class="hc-h-patient-meta"><span>Labmate PID:</span> <strong>${escHtml(p.labmate_pid)}</strong></div>` : ''}
+              <div class="hc-h-patient-meta"><span>Contact Mobile:</span> <strong>${escHtml(p.contact_mobile || '-')}</strong></div>
+            </div>`).join('')
+          : '<div class="text-light small">No patient details.</div>';
+        $popup.html(`
+          <div class="hc-h-pop-slot">${escHtml(b.preferred_time_slot || '-')}</div>
+          <div class="hc-h-patient-grid ${patients.length > 1 ? 'multi' : 'single'}">${patientsHtml}</div>
+        `);
+      })
+      .fail(function (xhr) {
+        $popup.html(`<div class="text-light small">${escHtml(xhr?.responseJSON?.message || 'Unable to load details')}</div>`);
+      });
+  });
+}
+
+function renderRightPanelState(patients, referenceAddresses, callerHistory) {
+  const patientList = patients || [];
+  const refList = referenceAddresses || [];
+  if (callerHistory !== undefined) callerHistoryCache = callerHistory;
+  linkedPatientsCache = patientList;
+  referenceAddressesCache = refList;
+
+  const linkedHtml = patientList.length
+    ? patientList.map(p => `
+        <div class="chip ${p.selected ? 'selected' : ''}" data-patient-id="${p.id}">
+          <div><strong>${escHtml(p.full_name || '')}</strong> (${escHtml(p.age || '-')}) ${renderTagBadges(p.tag)}</div>
+          <small>${escHtml(p.default_address || '')}</small>
+        </div>
+      `).join('')
+    : '<div class="text-muted small">No linked patients yet.</div>';
+
+  const refHtml = refList.length
+    ? refList.map(renderReferenceAddressChip).join('')
+    : '<div class="text-muted small">No reference addresses.</div>';
+
+  $('#linked-patients-panel').html(linkedHtml);
+  $('#reference-addresses-panel').html(refHtml);
+  renderCallerHistoryPanel(callerHistoryCache);
 }
 
 function applyStep1Bundle(res) {
-  renderRightPanelState(res.linked_patients || []);
+  renderRightPanelState(
+    res.linked_patients || [],
+    res.reference_addresses || [],
+    Object.prototype.hasOwnProperty.call((res || {}), 'caller_history') ? (res.caller_history || null) : undefined
+  );
   renderSelectedPatientsState(res.selected_patients || []);
   bindRemovePatientButtons();
   bindEditPatientButtons();
   renderAddressesState(res.addresses || [], res.selected_address_id || 0);
   bindUseAddressButtons();
   bindEditAddressButtons();
+  bindFinalizeReferenceAddressButtons();
 }
 
 function bindRemovePatientButtons() {
@@ -214,6 +474,13 @@ function renderSelectedPatientsState(list) {
     $('#selected-patient-tags').html('<div class="text-muted">No patients selected yet.</div>');
     return;
   }
+  const formatDob = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s) return '-';
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return s;
+    return `${m[3]}-${m[2]}-${m[1]}`;
+  };
   const html = selectedList.map(p => `
     <div class="selected-patient-card">
       <div class="selected-patient-card-top">
@@ -221,10 +488,12 @@ function renderSelectedPatientsState(list) {
         <button class="rm-patient" data-patient-id="${p.patient_id}" title="Remove">x</button>
       </div>
       <div class="selected-patient-card-meta">
-        <span><strong>Age:</strong> ${p.age || '-'}</span>
-        <span><strong>DOB:</strong> ${p.date_of_birth || '-'}</span>
         <span><strong>Gender:</strong> ${p.gender || '-'}</span>
+        <span><strong>Age/DOB:</strong> ${p.age || '-'} / ${formatDob(p.date_of_birth)}</span>
         <span><strong>Contact:</strong> ${p.contact_mobile || '-'}</span>
+        <span><strong>Alt Mobile:</strong> ${p.alternate_mobile || '-'}</span>
+        <span><strong>Labmate PID:</strong> ${p.labmate_pid || '-'}</span>
+        <span><strong>Email:</strong> ${p.email || '-'}</span>
         <span><strong>Panel:</strong> ${p.panel_company || '-'}</span>
       </div>
       <div class="selected-patient-card-actions">
@@ -245,7 +514,7 @@ function bindUseAddressButtons() {
       contentType: 'application/json',
       data: JSON.stringify({ address_id: addressId }),
       success: function (r) {
-        slotSelectedRoute = (r?.snapshot?.route_no_snapshot || '').trim() || slotSelectedRoute;
+        slotSelectedRoute = (r?.snapshot?.route_no || '').trim() || slotSelectedRoute;
         $('#slot-selected-route').val(slotSelectedRoute);
         loadAddresses();
       }
@@ -261,6 +530,28 @@ function bindEditAddressButtons() {
   });
 }
 
+function bindFinalizeReferenceAddressButtons() {
+  $('#reference-addresses-panel .btn-finalize-reference-address').off('click').on('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const referenceAddressId = Number($(this).data('reference-address-id') || 0);
+    if (!referenceAddressId) return;
+    if (!confirm('Are you sure you want to finalize and remove this reference address?')) return;
+    $.ajax({
+      url: `/hhome-collection/reference-address/${referenceAddressId}/finalize`,
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({}),
+      success: function (res) {
+        applyStep1Bundle(res || {});
+      },
+      error: function (xhr) {
+        alert(xhr.responseJSON?.message || 'Unable to finalize reference address');
+      }
+    });
+  });
+}
+
 function renderAddressesState(addresses, selectedAddressId) {
   const list = addresses || [];
   if (!list.length) {
@@ -271,8 +562,8 @@ function renderAddressesState(addresses, selectedAddressId) {
   const html = list.map(a => `
     <div class="address-card ${selectedId === a.id ? 'selected-address' : ''}">
       <div><strong>${a.address_type}</strong></div>
-      <div>${a.house_flat_no}, ${a.floor || ''}, ${a.street_line || ''}</div>
-      <div>${a.colony_name_snapshot}, ${a.pincode_snapshot} | ${a.route_no_snapshot} | ${a.city}</div>
+      <div>${escHtml([a.house_flat_no, a.floor_display || a.floor || '', a.block_tower_no || '', a.street_sector || a.street_line || ''].filter(Boolean).join(', '))}</div>
+      <div>${a.colony_name}, ${a.pincode} | ${a.route_no} | ${a.city}</div>
       <div class="address-card-actions">
         <button class="btn btn-sm btn-outline-success btn-use-address" data-address-id="${a.id}">Use This Address</button>
         <button class="btn btn-sm btn-outline-success btn-use-address btn-edit-address" data-address-id="${a.id}" title="Edit">Edit</button>
@@ -283,8 +574,20 @@ function renderAddressesState(addresses, selectedAddressId) {
 }
 
 function bindStepEvents() {
+  initAppointmentTagPickers();
+
   if (currentStep === 1) {
-    $('#btn-search-caller').off('click').on('click', searchCaller);
+    renderPatientTitleOptions('');
+    $('#btn-search-caller').off('click').on('click', function (e) {
+      e.preventDefault();
+      searchCaller();
+    });
+    $('#search-mobile').off('keydown.searchEnter').on('keydown.searchEnter', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        searchCaller();
+      }
+    });
     $('#btn-show-patient-form').off('click').on('click', function () {
       if (editingPatientId) {
         resetPatientFormState();
@@ -315,6 +618,36 @@ function bindStepEvents() {
     $('#p-dob').off('change').on('change', autoFillAgeFromDob);
     $('#p-age-years').off('input change').on('input change', autoDobFromAge);
     $('#p-title').off('change').on('change', autoGenderByTitle);
+    $('#btn-patient-documents').off('click').on('click', function () {
+      $('#p-patient-documents').trigger('click');
+    });
+    $('#p-patient-documents').off('change').on('change', function () {
+      const files = Array.from(this.files || []);
+      if (files.length > 5) {
+        alert('Maximum 5 patient documents per patient allowed.');
+        $(this).val('');
+        renderPatientDocumentSelection([]);
+        return;
+      }
+      renderPatientDocumentSelection(files);
+    });
+    $('#a-floor-special').off('change').on('change', function () {
+      syncFloorFieldState();
+      if (!$(this).val()) {
+        $('#a-floor').trigger('input');
+      }
+    });
+    $('#a-floor').off('input').on('input', function () {
+      const cleaned = String($(this).val() || '').replace(/[^\d]/g, '');
+      if (cleaned !== $(this).val()) {
+        $(this).val(cleaned);
+      }
+      if (cleaned) {
+        $('#a-floor-special').val('');
+      }
+      syncFloorFieldState();
+      validateFloorField();
+    });
     initPatientTagPicker();
   wirePatientPanelSuggest();
     $(document).off('change', '#a-city').on('change', '#a-city', function () {
@@ -325,8 +658,9 @@ function bindStepEvents() {
     if ($('#a-city').val()) {
       loadColonies(false);
     }
-    resetPatientFormState();
     resetAddressFormState();
+    resetPatientFormState();
+    hydrateStep1FromSession();
   }
 
   if (currentStep === 2) {
@@ -337,9 +671,13 @@ function bindStepEvents() {
     wireInternalRefSuggest();
     $('#btn-back-step1').off('click').on('click', () => setStep(1));
     $('#btn-go-step3').off('click').on('click', goStep3);
-    $('#btn-open-slots').off('click').on('click', openSlotPlanner);
-    $('#btn-slot-grid-search').off('click').on('click', loadRouteSlotGrid);
-    $('#slot-grid-date').off('change').on('change', loadRouteSlotGrid);
+    $('#btn-open-slots').off('click').on('click', function (e) {
+      e.preventDefault();
+      openSlotPlanner();
+    });
+    $('#slot-grid-date').off('change').on('change', function () {
+      loadRouteSlotGrid();
+    });
   }
 
   if (currentStep === 3) {
@@ -354,7 +692,7 @@ function bindStepEvents() {
     $('#btn-confirm-booking').off('click').on('click', confirmBooking);
   }
 
-  $('#right-panel').off('click', '.chip').on('click', '.chip', function () {
+  $('#linked-patients-panel').off('click', '.chip').on('click', '.chip', function () {
     const patientId = $(this).data('patient-id');
     const selected = linkedPatientsCache.find(x => x.id === patientId || x.id === Number(patientId));
     if (selected && selected.selected) {
@@ -407,10 +745,13 @@ function resetPatientFormState() {
   $('#new-patient-form').addClass('d-none');
   $('#btn-save-patient').text('Save Patient');
   $('#btn-show-patient-form').text('+ Add New Patient');
-  $('#p-title').val('');
+  renderPatientTitleOptions('');
   $('#p-full-name').val('');
   $('#p-labmate-pid').val('');
   $('#p-panel-company').val('');
+  $('#p-card-number').val('');
+  $('#p-patient-documents').val('');
+  $('#p-patient-documents-list').text('0 selected');
   $('#p-panel-company-suggest').addClass('d-none').html('');
   $('#p-gender').val('Male');
   $('#p-dob').val('');
@@ -419,7 +760,17 @@ function resetPatientFormState() {
   $('#p-alternate-mobile').val('');
   $('#p-email').val('');
   selectedPatientTags = [];
-  $('#patient-tag-picker .patient-tag-chip').removeClass('active');
+  $('#patient-tag-select').val('');
+  renderSelectedTags($('#patient-tag-picker'), selectedPatientTags, 'patient-tag-remove');
+}
+
+function renderPatientDocumentSelection(files, existingDocs = []) {
+  const selectedCount = Array.from(files || []).length;
+  const existingCount = (existingDocs || []).filter(Boolean).length;
+  const parts = [];
+  if (existingCount) parts.push(`${existingCount} uploaded`);
+  parts.push(`${selectedCount} selected`);
+  $('#p-patient-documents-list').text(parts.join(', '));
 }
 
 function resetAddressFormState() {
@@ -430,32 +781,271 @@ function resetAddressFormState() {
   $('#a-type').val('Home');
   $('#a-house').val('');
   $('#a-floor').val('');
+  $('#a-floor-special').val('');
   $('#a-city').val('');
   $('#a-colony').val('').trigger('change');
   $('#a-pincode').val('');
   $('#a-route').val('');
+  $('#a-block').val('');
   $('#a-street').val('');
+  $('#a-landmark').val('');
+  $('#a-google-location').val('');
   $('#a-access').val('');
+  syncFloorFieldState();
+}
+
+function clearFloorValidity() {
+  const el = document.getElementById('a-floor');
+  if (el && typeof el.setCustomValidity === 'function') {
+    el.setCustomValidity('');
+  }
+}
+
+function floorIsFullHouse() {
+  return String($('#a-floor-special').val() || '').trim().length > 0;
+}
+
+function syncFloorFieldState() {
+  const checked = floorIsFullHouse();
+  const $floor = $('#a-floor');
+  $floor.prop('disabled', checked);
+  if (checked) {
+    $floor.val('');
+  }
+  clearFloorValidity();
+}
+
+function validateFloorField() {
+  const $floor = $('#a-floor');
+  const el = $floor[0];
+  if (!el) return true;
+
+  if (floorIsFullHouse()) {
+    clearFloorValidity();
+    return true;
+  }
+
+  const raw = String($floor.val() || '').trim();
+  if (!raw) {
+    el.setCustomValidity('Enter a floor number from 1 to 99 or select one floor option.');
+    return false;
+  }
+  if (!/^\d{1,2}$/.test(raw)) {
+    el.setCustomValidity('Floor must be a number from 1 to 99.');
+    return false;
+  }
+  const num = Number(raw);
+  if (!Number.isInteger(num) || num < 1 || num > 99) {
+    el.setCustomValidity('Floor must be a number from 1 to 99.');
+    return false;
+  }
+  clearFloorValidity();
+  return true;
+}
+
+function getAddressPayload() {
+  const selectedSpecial = String($('#a-floor-special').val() || '').trim();
+  const floorChecked = selectedSpecial.length > 0;
+  const floorValue = String($('#a-floor').val() || '').trim();
+  return {
+    address_type: $('#a-type').val(),
+    house_flat_no: $('#a-house').val().trim(),
+    full_house: floorChecked,
+    floor: floorChecked ? selectedSpecial : floorValue,
+    block_tower_no: $('#a-block').val().trim(),
+    street_sector: $('#a-street').val().trim(),
+    landmark: $('#a-landmark').val().trim(),
+    city: $('#a-city').val(),
+    colony_id: $('#a-colony').val(),
+    pincode: $('#a-pincode').val().trim(),
+    route: $('#a-route').val().trim(),
+    google_location: $('#a-google-location').val().trim(),
+    access_notes: $('#a-access').val().trim()
+  };
+}
+
+function normalizeTagList(values) {
+  const seen = new Set();
+  const out = [];
+  (values || []).forEach((raw) => {
+    const txt = String(raw || '').trim();
+    if (!txt) return;
+    const key = txt.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(txt);
+  });
+  return out;
+}
+
+function displayTagLabel(tag) {
+  return String(tag || '').replace(/\s*\(/g, ' (').trim();
+}
+
+function renderSelectedTags($container, tags, removeClass) {
+  const list = normalizeTagList(tags);
+  if (!list.length) {
+    $container.html('<div class="text-muted small">No tags selected.</div>');
+    return;
+  }
+  const html = list.map((tag) => `
+    <span class="patient-tag-chip active">
+      ${escHtml(displayTagLabel(tag))}
+      <button type="button" class="tag-chip-remove ${removeClass}" data-tag="${escHtml(tag)}" aria-label="Remove">&times;</button>
+    </span>
+  `).join('');
+  $container.html(html);
+}
+
+function buildTagSelectOptions(typeKey, selected) {
+  const list = normalizeTagList(tagOptions?.[typeKey] || []);
+  const selectedSet = new Set((selected || []).map((x) => String(x || '').trim().toLowerCase()));
+  const rows = ['<option value="">Select</option>'];
+  const vvipKey = 'vvip(top priority)';
+  let insertedSpecialAfterVvip = false;
+  list.forEach((tag) => {
+    const key = String(tag || '').toLowerCase();
+    if (!selectedSet.has(key)) {
+      rows.push(`<option value="${escHtml(tag)}">${escHtml(displayTagLabel(tag))}</option>`);
+      if (typeKey === 'permanent' && key === vvipKey) {
+        rows.push('<option value="__pick_preferred_phlebo__">Preferred Phlebo</option>');
+        rows.push('<option value="__pick_avoid_phlebo__">Avoid Phlebo</option>');
+        insertedSpecialAfterVvip = true;
+      }
+    }
+  });
+  if (typeKey === 'permanent' && !insertedSpecialAfterVvip) {
+    rows.push('<option value="__pick_preferred_phlebo__">Preferred Phlebo</option>');
+    rows.push('<option value="__pick_avoid_phlebo__">Avoid Phlebo</option>');
+  }
+  return rows.join('');
+}
+
+function refreshTagDropdowns() {
+  const $patient = $('#patient-tag-select');
+  if ($patient.length) {
+    $patient.html(buildTagSelectOptions('patient', selectedPatientTags)).val('');
+  }
+  const $permanent = $('#ap-permanent-tag-select');
+  if ($permanent.length) {
+    $permanent.html(buildTagSelectOptions('permanent', selectedPermanentTags)).val('');
+  }
+  const $booking = $('#ap-booking-tag-select');
+  if ($booking.length) {
+    $booking.html(buildTagSelectOptions('transactional', selectedBookingTags)).val('');
+  }
 }
 
 function initPatientTagPicker() {
-  if (!Array.isArray(selectedPatientTags)) selectedPatientTags = [];
-  $('#patient-tag-picker .patient-tag-chip').removeClass('active');
-  selectedPatientTags.forEach((tag) => {
-    $(`#patient-tag-picker .patient-tag-chip[data-tag="${tag}"]`).addClass('active');
-  });
-  $('#patient-tag-picker').off('click', '.patient-tag-chip').on('click', '.patient-tag-chip', function () {
-    const tag = ($(this).data('tag') || '').toString().trim();
+  renderSelectedTags($('#patient-tag-picker'), selectedPatientTags, 'patient-tag-remove');
+  refreshTagDropdowns();
+
+  $('#patient-tag-select').off('change').on('change', function () {
+    const tag = String($(this).val() || '').trim();
     if (!tag) return;
-    if ($(this).hasClass('active')) {
-      $(this).removeClass('active');
-      selectedPatientTags = selectedPatientTags.filter(t => t !== tag);
-    } else {
-      $(this).addClass('active');
-      if (!selectedPatientTags.includes(tag)) selectedPatientTags.push(tag);
-    }
+    selectedPatientTags = normalizeTagList([...(selectedPatientTags || []), tag]);
+    renderSelectedTags($('#patient-tag-picker'), selectedPatientTags, 'patient-tag-remove');
+    refreshTagDropdowns();
+  });
+
+  $('#patient-tag-picker').off('click', '.patient-tag-remove').on('click', '.patient-tag-remove', function () {
+    const tag = String($(this).data('tag') || '').trim().toLowerCase();
+    selectedPatientTags = (selectedPatientTags || []).filter((x) => String(x || '').trim().toLowerCase() !== tag);
+    renderSelectedTags($('#patient-tag-picker'), selectedPatientTags, 'patient-tag-remove');
+    refreshTagDropdowns();
   });
 }
+
+function initAppointmentTagPickers() {
+  renderSelectedTags($('#ap-permanent-tags'), selectedPermanentTags, 'ap-permanent-tag-remove');
+  renderSelectedTags($('#ap-booking-tags'), selectedBookingTags, 'ap-booking-tag-remove');
+  refreshTagDropdowns();
+
+  $('#ap-permanent-tag-select').off('change').on('change', function () {
+    const tag = String($(this).val() || '').trim();
+    if (!tag) return;
+    if (tag === '__pick_preferred_phlebo__' || tag === '__pick_avoid_phlebo__') {
+      $(this).val('');
+      openPhleboTagModal(tag);
+      return;
+    }
+    selectedPermanentTags = normalizeTagList([...(selectedPermanentTags || []), tag]);
+    renderSelectedTags($('#ap-permanent-tags'), selectedPermanentTags, 'ap-permanent-tag-remove');
+    refreshTagDropdowns();
+  });
+
+  $('#ap-booking-tag-select').off('change').on('change', function () {
+    const tag = String($(this).val() || '').trim();
+    if (!tag) return;
+    selectedBookingTags = normalizeTagList([...(selectedBookingTags || []), tag]);
+    renderSelectedTags($('#ap-booking-tags'), selectedBookingTags, 'ap-booking-tag-remove');
+    refreshTagDropdowns();
+  });
+
+  $('#ap-permanent-tags').off('click', '.ap-permanent-tag-remove').on('click', '.ap-permanent-tag-remove', function () {
+    const tag = String($(this).data('tag') || '').trim().toLowerCase();
+    selectedPermanentTags = (selectedPermanentTags || []).filter((x) => String(x || '').trim().toLowerCase() !== tag);
+    renderSelectedTags($('#ap-permanent-tags'), selectedPermanentTags, 'ap-permanent-tag-remove');
+    refreshTagDropdowns();
+  });
+
+  $('#ap-booking-tags').off('click', '.ap-booking-tag-remove').on('click', '.ap-booking-tag-remove', function () {
+    const tag = String($(this).data('tag') || '').trim().toLowerCase();
+    selectedBookingTags = (selectedBookingTags || []).filter((x) => String(x || '').trim().toLowerCase() !== tag);
+    renderSelectedTags($('#ap-booking-tags'), selectedBookingTags, 'ap-booking-tag-remove');
+    refreshTagDropdowns();
+  });
+}
+
+function openPhleboTagModal(mode) {
+  phleboTagMode = mode === '__pick_avoid_phlebo__' ? 'avoid' : 'preferred';
+  phleboTagSelected = null;
+  $('#phleboTagModalTitle').text(phleboTagMode === 'avoid' ? 'Select Avoid Phlebo' : 'Select Preferred Phlebo');
+  $('#phlebo-tag-chip-list').html('<div class="text-muted">Loading phlebos...</div>');
+  $('#phlebo-tag-apply-btn').prop('disabled', true);
+
+  if (!phleboTagModal) {
+    const el = document.getElementById('phleboTagModal');
+    if (el) phleboTagModal = new bootstrap.Modal(el);
+  }
+  if (phleboTagModal) phleboTagModal.show();
+
+  $.get('/hhome-collection/phlebotomists', function (res) {
+    const list = (res?.phlebotomists || []).map((x) => ({
+      id: Number(x.id || 0),
+      full_name: String(x.full_name || x.name || '').trim()
+    })).filter((x) => x.id > 0 && x.full_name);
+
+    const html = (typeof window.renderHcAssignAlphaChipGroups === 'function')
+      ? window.renderHcAssignAlphaChipGroups(list, { selectedUserId: 0, assignedSet: new Set() })
+      : list.map((x) => `<button type="button" class="assign-chip" data-user-id="${x.id}">${escHtml(x.full_name)}</button>`).join('');
+    $('#phlebo-tag-chip-list').html(html || '<div class="text-muted">No phlebo found.</div>');
+  }).fail(function () {
+    $('#phlebo-tag-chip-list').html('<div class="text-danger">Unable to load phlebo list.</div>');
+  });
+}
+
+$(document).off('click.phleboTag', '#phlebo-tag-chip-list .assign-chip').on('click.phleboTag', '#phlebo-tag-chip-list .assign-chip', function () {
+  const $chip = $(this);
+  $('#phlebo-tag-chip-list .assign-chip').removeClass('active');
+  $chip.addClass('active');
+  phleboTagSelected = {
+    id: Number($chip.data('user-id') || 0),
+    name: String($chip.text() || '').trim()
+  };
+  $('#phlebo-tag-apply-btn').prop('disabled', !(phleboTagSelected.id > 0 && phleboTagSelected.name));
+});
+
+$(document).off('click.phleboTagApply', '#phlebo-tag-apply-btn').on('click.phleboTagApply', '#phlebo-tag-apply-btn', function () {
+  if (!phleboTagSelected || !phleboTagSelected.name) return;
+  const label = phleboTagMode === 'avoid'
+    ? `avoid ${phleboTagSelected.name} phlebo`
+    : `prefered ${phleboTagSelected.name} phlebo`;
+  selectedPermanentTags = normalizeTagList([...(selectedPermanentTags || []), label]);
+  renderSelectedTags($('#ap-permanent-tags'), selectedPermanentTags, 'ap-permanent-tag-remove');
+  refreshTagDropdowns();
+  if (phleboTagModal) phleboTagModal.hide();
+});
 
 function autoFillAgeFromDob() {
   const dobStr = $('#p-dob').val();
@@ -490,14 +1080,106 @@ function autoDobFromAge() {
   $('#p-dob').val(dob);
 }
 
+function isAppointmentLevelFlow() {
+  const flow = String(wizardData?.modify?.flow_type || '').trim().toLowerCase();
+  return flow === 'modify_appointment' || flow === 'followup_appointment';
+}
+
+function applyPatientAddRules() {
+  const isAppointmentFlow = isAppointmentLevelFlow();
+  const $btn = $('#btn-show-patient-form');
+  if (!$btn.length) return;
+
+  $btn.prop('disabled', isAppointmentFlow);
+  if (isAppointmentFlow) {
+    $('#new-patient-form').addClass('d-none');
+    if (!editingPatientId) {
+      $btn.text('+ Add New Patient');
+    }
+  }
+}
+
 function toggleStep1Workspace(enabled) {
   const note = enabled
     ? '<span class="text-success">Caller selected. Add/select patient and address.</span>'
-    : 'Caller not found. Fill patient form with contact details to auto-create caller.';
+    : 'Search number first. If not found, save patient with contact details and caller will auto-create.';
   $('#step1-workspace-note').html(note);
 }
 
+function setStep1SearchLock(isLocked) {
+  const lock = Boolean(isLocked);
+  $('#search-mobile').prop('readonly', lock);
+  $('#btn-search-caller').prop('disabled', lock);
+}
+
+function applyTagOptionsFromContext(ctxRes) {
+  const opts = ctxRes?.tag_options || {};
+  tagOptions = {
+    patient: normalizeTagList(opts.patient || []),
+    permanent: normalizeTagList(opts.permanent || []),
+    transactional: normalizeTagList(opts.transactional || [])
+  };
+  refreshTagDropdowns();
+}
+
+function hydrateStep1FromSession() {
+  $.get('/hhome-collection/modify-context', function (ctxRes) {
+    applyTagOptionsFromContext(ctxRes);
+    const hasModifyContext = Boolean(ctxRes?.ok && ctxRes?.active && ctxRes?.context);
+    setStep1SearchLock(hasModifyContext);
+
+    if (ctxRes?.ok && ctxRes?.active && ctxRes?.context) {
+      const ctx = ctxRes.context || {};
+      wizardData.modify = {
+        booking_id: Number(ctx.booking_id || 0),
+        appointment_id: Number(ctx.appointment_id || 0),
+        flow_type: String(ctx.flow_type || '').trim().toLowerCase(),
+        reason_text: ctx.reason_text || ''
+      };
+      wizardData.appointment = ctx.appointment || {};
+      selectedPermanentTags = normalizeTagList(String(wizardData.appointment.permanent_tags || '').split(','));
+      selectedBookingTags = normalizeTagList(String(wizardData.appointment.booking_tags || '').split(','));
+      renderSelectedTags($('#ap-permanent-tags'), selectedPermanentTags, 'ap-permanent-tag-remove');
+      renderSelectedTags($('#ap-booking-tags'), selectedBookingTags, 'ap-booking-tag-remove');
+      refreshTagDropdowns();
+      wizardData.testsBilling = ctx.tests_billing_map || {};
+      wizardData.searchedMobile = ctx.searched_mobile || wizardData.searchedMobile;
+    } else {
+      wizardData.modify = {};
+    }
+    applyPatientAddRules();
+
+    $.get('/hhome-collection/current-caller', function (res) {
+      const caller = res?.caller || null;
+      if (!caller) {
+        hasCallerContext = false;
+        toggleStep1Workspace(false);
+        if (wizardData.searchedMobile) $('#search-mobile').val(wizardData.searchedMobile);
+        renderCallerHistoryPanel(res?.caller_history || null);
+        return;
+      }
+
+      hasCallerContext = true;
+      toggleStep1Workspace(true);
+      setCallerInlineChip(caller);
+      renderCallerHistoryPanel(res?.caller_history || null);
+      if (caller.primary_mobile) $('#search-mobile').val(caller.primary_mobile);
+
+      $.get('/hhome-collection/linked-patients', function (lp) {
+        renderRightPanelState(lp?.patients || [], lp?.reference_addresses || []);
+      });
+      $.get('/hhome-collection/selected-patients', function (sp) {
+        renderSelectedPatientsState(sp?.selected_patients || []);
+        bindRemovePatientButtons();
+        bindEditPatientButtons();
+      });
+      loadAddresses();
+    });
+  });
+}
+
 function searchCaller() {
+  if (Number(wizardData?.modify?.booking_id || 0) > 0) return;
   const mobile = $('#search-mobile').val().trim();
   if (!mobile) return alert('Enter mobile number');
   wizardData.searchedMobile = mobile;
@@ -519,7 +1201,8 @@ function searchCaller() {
         renderAddressesState(res.addresses || [], res.selected_address_id || 0);
         bindUseAddressButtons();
         bindEditAddressButtons();
-        renderRightPanelState(res.linked_patients || []);
+        renderRightPanelState(res.linked_patients || [], res.reference_addresses || [], res.caller_history || null);
+        bindFinalizeReferenceAddressButtons();
         resetPatientFormState();
         resetAddressFormState();
       } else {
@@ -529,7 +1212,7 @@ function searchCaller() {
         toggleStep1Workspace(false);
         renderSelectedPatientsState([]);
         renderAddressesState([], 0);
-        renderRightPanelState([]);
+        renderRightPanelState([], [], res.caller_history || null);
         resetPatientFormState();
         resetAddressFormState();
         $('#p-contact-mobile').val(res.mobile || mobile);
@@ -550,10 +1233,13 @@ function startEditPatient(patientId) {
     $('#btn-save-patient').text('Update Patient');
     $('#btn-show-patient-form').text('Cancel Edit');
 
-    $('#p-title').val(p.title || '');
+    renderPatientTitleOptions(p.title || '');
     $('#p-full-name').val(p.full_name || '');
     $('#p-labmate-pid').val(p.labmate_pid || '');
     $('#p-panel-company').val(p.panel_company || '');
+    $('#p-card-number').val(p.card_number || '');
+    $('#p-patient-documents').val('');
+    renderPatientDocumentSelection([], p.patient_documents || []);
     $('#p-gender').val(p.gender || 'Male');
     $('#p-dob').val(p.date_of_birth || '');
     $('#p-age-years').val(p.age_years || '');
@@ -561,10 +1247,7 @@ function startEditPatient(patientId) {
     $('#p-alternate-mobile').val(p.alternate_mobile || '');
     $('#p-email').val(p.email || '');
 
-    selectedPatientTags = (p.tag || '')
-      .split(',')
-      .map(x => x.trim())
-      .filter(Boolean);
+    selectedPatientTags = normalizeTagList(String(p.tag || '').split(','));
     initPatientTagPicker();
   }).fail(function (xhr) {
     alert(xhr.responseJSON?.message || 'Unable to load patient details');
@@ -581,13 +1264,25 @@ function startEditAddress(addressId) {
 
     $('#a-type').val(a.address_type || 'Home');
     $('#a-house').val(a.house_flat_no || '');
-    $('#a-floor').val(a.floor || '');
+    const floorValue = String(a.floor_display || a.floor || '').trim();
+    const specialOptions = ['Ground_F', 'Basement', 'Full_hous'];
+    if (specialOptions.includes(floorValue)) {
+      $('#a-floor-special').val(floorValue);
+      $('#a-floor').val('');
+    } else {
+      $('#a-floor-special').val('');
+      $('#a-floor').val(floorValue);
+    }
     $('#a-city').val(a.city || '');
-    $('#a-street').val(a.street_line || '');
+    $('#a-block').val(a.block_tower_no || '');
+    $('#a-street').val(a.street_sector || '');
+    $('#a-landmark').val(a.landmark || '');
+    $('#a-google-location').val(a.google_location || '');
     $('#a-access').val(a.access_notes || '');
-    $('#a-pincode').val(a.pincode_snapshot || '');
-    $('#a-route').val(a.route_no_snapshot || '');
+    $('#a-pincode').val(a.pincode || '');
+    $('#a-route').val(a.route_no || '');
 
+    syncFloorFieldState();
     loadColonies(false, String(a.colony_id || ''));
   }).fail(function (xhr) {
     alert(xhr.responseJSON?.message || 'Unable to load address details');
@@ -728,6 +1423,7 @@ function savePatient() {
     full_name: fullNameCore,
     labmate_pid: $('#p-labmate-pid').val().trim(),
     panel_company: $('#p-panel-company').val().trim(),
+    card_number: $('#p-card-number').val().trim(),
     tag: selectedPatientTags.join(','),
     gender: $('#p-gender').val(),
     date_of_birth: $('#p-dob').val() || null,
@@ -738,12 +1434,39 @@ function savePatient() {
     searched_mobile: wizardData.searchedMobile
   };
 
+  if (!data.full_name) return alert('Patient Full Name is required.');
+  if (!data.gender) return alert('Gender is required.');
+  if (!data.contact_mobile) return alert('Contact No is required.');
+
+  const documentFiles = Array.from($('#p-patient-documents')[0]?.files || []);
+  if (documentFiles.length > 5) {
+    return alert('Maximum 5 patient documents per patient allowed.');
+  }
+  const allowedExts = ['.pdf', '.jpg', '.jpeg', '.png'];
+  const invalidFile = documentFiles.find((file) => {
+    const name = String(file.name || '').toLowerCase();
+    return !allowedExts.some(ext => name.endsWith(ext));
+  });
+  if (invalidFile) {
+    return alert('Only PDF, JPG, JPEG, PNG files are allowed.');
+  }
+
   const isEdit = !!editingPatientId;
+  if (!isEdit && isAppointmentLevelFlow()) {
+    return alert('Appointment flow me Add Patient allowed nahi hai.');
+  }
+  const formData = new FormData();
+  Object.entries(data).forEach(([key, value]) => {
+    formData.append(key, value == null ? '' : value);
+  });
+  documentFiles.forEach((file) => formData.append('patient_documents', file));
+
   $.ajax({
     url: isEdit ? `/hhome-collection/patient/${editingPatientId}` : '/hhome-collection/create-patient',
     method: isEdit ? 'PATCH' : 'POST',
-    contentType: 'application/json',
-    data: JSON.stringify(data),
+    data: formData,
+    processData: false,
+    contentType: false,
     success: function (res) {
       hasCallerContext = true;
       toggleStep1Workspace(true);
@@ -830,16 +1553,16 @@ function saveAddress() {
     alert('Save at least one patient first. Caller will auto-create from patient contact.');
     return;
   }
-  const data = {
-    address_type: $('#a-type').val(),
-    house_flat_no: $('#a-house').val().trim(),
-    floor: $('#a-floor').val().trim(),
-    street_line: $('#a-street').val().trim(),
-    landmark: null,
-    city: $('#a-city').val(),
-    colony_id: $('#a-colony').val(),
-    access_notes: $('#a-access').val().trim()
-  };
+  if (!validateFloorField()) {
+    alert('Enter a floor number from 1 to 99 or select one floor option.');
+    return;
+  }
+
+  const data = getAddressPayload();
+  if (!data.house_flat_no) return alert('House/Flat No is required.');
+  if (!data.city) return alert('City is required.');
+  if (!data.colony_id) return alert('Colony is required.');
+  if (!data.pincode || !data.route) return alert('Pincode and route must auto-fill from the selected colony.');
 
   const isEdit = !!editingAddressId;
   $.ajax({
@@ -876,7 +1599,7 @@ function goStep2() {
       const selectedId = Number(aRes.selected_address_id || 0);
       const selectedAddress = (aRes.addresses || []).find(a => Number(a.id) === selectedId) || null;
       if (!slotSelectedRoute) {
-        slotSelectedRoute = (selectedAddress?.route_no_snapshot || '').trim();
+        slotSelectedRoute = (selectedAddress?.route_no || '').trim();
       }
       setStep(2);
     });
@@ -895,7 +1618,7 @@ function fetchLatestSelectedRoute(done) {
     if (reqId !== summaryRequestSeq) return;
     const selectedId = Number(res?.selected_address_id || 0);
     const selectedAddress = (res?.addresses || []).find(a => Number(a.id) === selectedId) || null;
-    const route = (selectedAddress?.route_no_snapshot || '').trim();
+    const route = (selectedAddress?.route_no || '').trim();
     slotSelectedRoute = route;
     if (typeof done === 'function') done(route);
   }).fail(function () {
@@ -969,26 +1692,86 @@ function collectTubesForSelectedTest(testItem, catalog) {
   return tubes;
 }
 
+function formatCharge(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n)) return '0';
+  return n.toFixed(2).replace(/\.00$/, '');
+}
+
 function renderReviewTestsHtml(selectedTests, catalog) {
-  if (!selectedTests.length) return '-';
-  const rows = selectedTests.map((t) => {
+  const list = Array.isArray(selectedTests) ? selectedTests : [];
+  if (!list.length) {
+    return { html: '<div class="text-muted">No tests selected.</div>', total: 0, subtotal: 0, discountTotal: 0, tubes: [] };
+  }
+
+  const tubeSet = new Set();
+  let total = 0;
+  let subtotal = 0;
+  let discountTotal = 0;
+  const rows = list.map((t, idx) => {
     const code = normalizeTestCode(t?.booked_code || t?.testcode1 || t?.test_code || '');
     const desc = String(t?.description || '').trim();
     const label = [code, desc].filter(Boolean).join(' - ') || 'Test';
-    const tubes = collectTubesForSelectedTest(t, catalog);
-    const tubeText = tubes.length ? tubes.join(', ') : '-';
-    return `<li><strong>${escHtml(label)}</strong> (Sample Tube: ${escHtml(tubeText)})</li>`;
+    const mrp = Number(t?.mrp || 0);
+    const discount = Number(t?.max_discount || 0);
+    const finalCharge = Math.max(0, mrp - discount);
+    subtotal += Number.isFinite(mrp) ? mrp : 0;
+    discountTotal += Number.isFinite(discount) ? discount : 0;
+    total += Number.isFinite(finalCharge) ? finalCharge : 0;
+    collectTubesForSelectedTest(t, catalog).forEach((tube) => {
+      const k = String(tube || '').trim().toLowerCase();
+      if (k) tubeSet.add(tube);
+    });
+    return `
+      <tr>
+        <td><strong>${escHtml(label)}</strong></td>
+        <td class="text-end">${escHtml(formatCharge(mrp))}</td>
+        <td class="text-end">${escHtml(formatCharge(discount))}</td>
+        <td class="text-end"><strong>${escHtml(formatCharge(finalCharge))}</strong></td>
+        <td class="text-center">-</td>
+      </tr>
+    `;
   }).join('');
-  return `<ol class="mb-0 ps-3">${rows}</ol>`;
+
+  const html = `
+    <div class="table-responsive hc-review-tests-table-wrap">
+      <table class="table table-sm mb-0 hc-review-tests-table">
+        <thead>
+          <tr>
+            <th>Test Name</th>
+            <th class="text-end" style="width:120px;">Standard Charge</th>
+            <th class="text-end" style="width:100px;">Discount</th>
+            <th class="text-end" style="width:120px;">Final Charge</th>
+            <th class="text-center" style="width:80px;">TAT</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+  return { html, total, subtotal, discountTotal, tubes: Array.from(tubeSet) };
 }
 
 function hydrateStep2() {
   const defaultDate = isoTomorrow();
+  const hasPermanentInState = Object.prototype.hasOwnProperty.call((wizardData.appointment || {}), 'permanent_tags');
+  const hasBookingInState = Object.prototype.hasOwnProperty.call((wizardData.appointment || {}), 'booking_tags');
+  const isModifyMode = Number(wizardData?.modify?.booking_id || 0) > 0;
+
   $('#b-date').val(wizardData.appointment.preferred_visit_date || defaultDate);
   $('#b-slot').val(wizardData.appointment.preferred_time_slot || '');
   $('#ap-referred-by').val(wizardData.appointment.referred_by || '');
   $('#ap-internal-ref').val(wizardData.appointment.internal_ref || '');
+  $('#ap-lead-id').val(wizardData.appointment.lead_id || '');
   $('#b-remarks').val(wizardData.appointment.remarks || '');
+  if (hasPermanentInState) {
+    selectedPermanentTags = normalizeTagList(String(wizardData.appointment.permanent_tags || '').split(','));
+  }
+  if (hasBookingInState) {
+    selectedBookingTags = normalizeTagList(String(wizardData.appointment.booking_tags || '').split(','));
+  }
+  renderSelectedTags($('#ap-permanent-tags'), selectedPermanentTags, 'ap-permanent-tag-remove');
+  renderSelectedTags($('#ap-booking-tags'), selectedBookingTags, 'ap-booking-tag-remove');
   if (slotSelectedRoute) {
     $('#slot-selected-route').val(slotSelectedRoute);
   } else {
@@ -996,6 +1779,35 @@ function hydrateStep2() {
       $('#slot-selected-route').val(route);
     });
   }
+
+  $('#b-date').prop('disabled', isModifyMode);
+  $('#b-slot').prop('disabled', isModifyMode);
+  if (isModifyMode) {
+    $('#btn-open-slots').addClass('d-none');
+  } else {
+    $('#btn-open-slots').removeClass('d-none');
+  }
+}
+
+function syncAppointmentTagsFromTopBar() {
+  wizardData.appointment = wizardData.appointment || {};
+  wizardData.appointment.permanent_tags = normalizeTagList(selectedPermanentTags).join(',');
+  wizardData.appointment.booking_tags = normalizeTagList(selectedBookingTags).join(',');
+}
+
+function syncAppointmentFromStep2Inputs() {
+  if (currentStep !== 2) return;
+  const hasStep2Fields = $('#b-date').length || $('#b-slot').length || $('#ap-referred-by').length || $('#ap-internal-ref').length || $('#ap-lead-id').length || $('#b-remarks').length;
+  if (!hasStep2Fields) return;
+  wizardData.appointment = wizardData.appointment || {};
+  wizardData.appointment.preferred_visit_date = $('#b-date').val() || wizardData.appointment.preferred_visit_date || '';
+  wizardData.appointment.preferred_time_slot = $('#b-slot').val() || wizardData.appointment.preferred_time_slot || '';
+  wizardData.appointment.referred_by = $('#ap-referred-by').val() || '';
+  wizardData.appointment.internal_ref = $('#ap-internal-ref').val() || '';
+  wizardData.appointment.lead_id = ($('#ap-lead-id').val() || '').trim();
+  wizardData.appointment.remarks = ($('#b-remarks').val() || '').trim();
+  wizardData.appointment.permanent_tags = normalizeTagList(selectedPermanentTags).join(',');
+  wizardData.appointment.booking_tags = normalizeTagList(selectedBookingTags).join(',');
 }
 
 function goStep3() {
@@ -1004,7 +1816,10 @@ function goStep3() {
     preferred_time_slot: $('#b-slot').val(),
     referred_by: $('#ap-referred-by').val(),
     internal_ref: $('#ap-internal-ref').val(),
-    remarks: $('#b-remarks').val().trim()
+    lead_id: ($('#ap-lead-id').val() || '').trim(),
+    remarks: $('#b-remarks').val().trim(),
+    permanent_tags: normalizeTagList(selectedPermanentTags).join(','),
+    booking_tags: normalizeTagList(selectedBookingTags).join(',')
   };
 
   if (!appt.preferred_visit_date || !appt.preferred_time_slot) {
@@ -1024,6 +1839,36 @@ function formatMinutesTo12h(totalMinutes) {
   let h12 = h24 % 12;
   if (h12 === 0) h12 = 12;
   return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ap}`;
+}
+
+function formatReviewDateDay(isoDate) {
+  const d = String(isoDate || '').trim();
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return d || '-';
+  const dt = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00`);
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const day = days[dt.getDay()] || '-';
+  return `${m[3]}-${m[2]} / ${day}`;
+}
+
+function formatSlotCompact(slotText) {
+  const s = String(slotText || '').trim();
+  const m = s.match(/(\d{1,2}:\d{2})\s*([AP]M)\s*to\s*(\d{1,2}:\d{2})\s*([AP]M)/i);
+  if (!m) return s || '-';
+  const start = m[1];
+  const endTime = m[3];
+  const endMeridiem = m[4].toUpperCase();
+  const [endHourRaw, endMin] = endTime.split(':');
+  let endHour = String(endHourRaw || '').replace(/^0+/, '');
+  if (!endHour) endHour = '0';
+  const endLabel = endMin === '00' ? `${endHour} ${endMeridiem}` : `${endHour}:${endMin} ${endMeridiem}`;
+  return `${start} to ${endLabel}`;
+}
+
+function tbsLabel(code) {
+  const c = normalizePatientTbs(code);
+  const row = (PATIENT_TBS_OPTIONS || []).find((x) => Number(x.code) === Number(c));
+  return row ? row.label : '-';
 }
 
 function generateHalfHourSlots() {
@@ -1060,6 +1905,9 @@ function openSlotPlanner() {
 }
 
 function loadRouteSlotGrid(forcedRoute) {
+  if (forcedRoute && typeof forcedRoute !== 'string') {
+    forcedRoute = '';
+  }
   const dateVal = $('#slot-grid-date').val() || isoTomorrow();
   const routeVal = (forcedRoute || $('#slot-selected-route').val() || slotSelectedRoute || '').trim();
   $('#slot-grid-wrap').html('<div class="text-muted p-2">Loading slots...</div>');
@@ -1118,7 +1966,7 @@ function renderRouteSlotGrid(res) {
 
   $('#slot-grid-wrap').html(html);
   $('#slot-grid-wrap .slot-pick-btn').off('click').on('click', function () {
-    const pickedDate = $(this).data('date');
+    const pickedDate = $('#slot-grid-date').val() || $(this).data('date');
     const pickedSlot = $(this).data('slot');
     $('#b-date').val(pickedDate);
     $('#b-slot').val(pickedSlot);
@@ -1127,29 +1975,73 @@ function renderRouteSlotGrid(res) {
 }
 
 function ensureTbObject(pid) {
-  wizardData.testsBilling[pid] = wizardData.testsBilling[pid] || {
+  const key = String(pid);
+  const tb = wizardData.testsBilling[key] || {
     panel: null,
     billing: null,
-    selected_tests: []
+    selected_tests: [],
+    cce_level_tbs: null
   };
-  return wizardData.testsBilling[pid];
+  if (tb.cce_level_tbs === undefined && tb.cce_level_TBS !== undefined) {
+    tb.cce_level_tbs = tb.cce_level_TBS;
+  }
+  if (tb.cce_level_tbs === undefined) tb.cce_level_tbs = null;
+  if (!Array.isArray(tb.panels)) {
+    tb.panels = [
+      normalizePanelSection({
+        panel: tb.panel || null,
+        billing: tb.billing || null,
+        selected_tests: Array.isArray(tb.selected_tests) ? tb.selected_tests : []
+      })
+    ];
+  }
+  if (!tb.panels.length) {
+    tb.panels.push(normalizePanelSection({ panel: null, billing: null, selected_tests: [] }));
+  }
+  tb.panels = tb.panels.map(normalizePanelSection);
+  syncPrimaryPanelFields(tb);
+  wizardData.testsBilling[key] = tb;
+  return tb;
+}
+
+function normalizePatientTbs(raw) {
+  const n = Number(raw);
+  if (n >= 1 && n <= 4) return n;
+  return null;
+}
+
+function patientCanBookTests(tbObj) {
+  const code = normalizePatientTbs(tbObj?.cce_level_tbs);
+  if (code === 3) return false;
+  return true;
+}
+
+function updatePatientBookButtons(pid) {
+  const patientId = String(pid || '');
+  if (!patientId) return;
+  const tb = ensureTbObject(patientId);
+  const canBookByStatus = patientCanBookTests(tb);
+  (tb.panels || []).forEach((section, idx) => {
+    const key = panelDomKey(patientId, idx);
+    const hasBilling = !!String(section?.billing?.comp_cat_id ?? '').trim();
+    $(`#tb-book-btn-${key}`).prop('disabled', !(canBookByStatus && hasBilling));
+  });
 }
 
 function testSelKey(t) {
-  const g = String(t?.gcode || '');
-  const s = String(t?.scode || '');
-  const b = String(t?.booked_code || t?.test_code || '');
-  return `${g}|${s}|${b}`.toUpperCase();
+  return String(t?.booked_code || '').trim().toUpperCase();
 }
 
-function autoResolveBillingFromPanel(patientId, panelName) {
+function autoResolveBillingFromPanel(patientId, panelName, panelIndex = 0) {
   const pid = String(patientId || '');
+  const idx = Number(panelIndex || 0);
+  const key = panelDomKey(pid, idx);
   const pname = String(panelName || '').trim();
   if (!pid || !pname || pname.length < 2) return;
 
-  const tb = ensureTbObject(pid);
-  const existingCompCat = String(tb?.billing?.comp_cat_id || '').trim();
-  const existingChargeMode = String(tb?.billing?.charge_mode_code || tb?.billing?.charge_mode || '').trim();
+  const section = getPanelSection(pid, idx);
+  const existingCompCat = String(section?.billing?.comp_cat_id ?? '').trim();
+  const existingChargeMode = String(section?.billing?.selected_charge_mode || section?.billing?.charge_mode_code || section?.billing?.charge_mode || '').trim();
   if (existingCompCat && existingCompCat !== '0' && existingChargeMode) {
     return;
   }
@@ -1164,30 +2056,46 @@ function autoResolveBillingFromPanel(patientId, panelName) {
     if (!picked) picked = items[0];
     if (!picked) return;
 
-    tb.panel = {
+    section.panel = {
       center_id: String(picked.CenterID || ''),
       pname: String(picked.pname || '')
     };
-    tb.billing = {
+    const allowedChargeMode = normalizeChargeModeCode(picked.BillingChargeMode || '');
+    section.billing = {
       comp_cat_id: String(picked.CompCatID ?? ''),
       cat_details: String(picked.CatDetails || ''),
-      charge_mode_code: normalizeChargeModeCode(picked.BillingChargeMode || '')
+      allowed_charge_mode_code: allowedChargeMode,
+      charge_mode: allowedChargeMode,
+      charge_mode_code: allowedChargeMode,
+      selected_charge_mode: ''
     };
+    syncPrimaryPanelFields(ensureTbObject(pid));
 
-    $(`#tb-panel-input-${pid}`).val(tb.panel.pname);
-    $(`#tb-bill-id-${pid}`).val(tb.billing.comp_cat_id);
-    $(`#tb-bill-name-${pid}`).val(tb.billing.cat_details);
-    renderChargeModeControl(pid, tb.billing);
-    $(`#tb-book-btn-${pid}`).prop('disabled', !String(tb.billing.comp_cat_id || '').trim());
+    $(`#tb-panel-input-${key}`).val(section.panel.pname);
+    $(`#tb-bill-id-${key}`).val(section.billing.comp_cat_id);
+    $(`#tb-bill-name-${key}`).val(section.billing.cat_details);
+    renderChargeModeControl(pid, idx, section.billing);
+    updatePatientBookButtons(pid);
   });
 }
 
 function bindPanelBillingEvents() {
+  $(document).off('input.hcPanelTestSearch', '#panel-test-search').on('input.hcPanelTestSearch', '#panel-test-search', function () {
+    const q = String($(this).val() || '').trim();
+    panelTestSearchQuery = q;
+    if (panelTestSearchTimer) clearTimeout(panelTestSearchTimer);
+    panelTestSearchTimer = setTimeout(() => {
+      loadPanelTestsForCurrentView();
+    }, 250);
+  });
+
   $('#tests-billing-sections').off('input', '.tb-panel-search').on('input', '.tb-panel-search', function () {
     const $input = $(this);
     const patientId = String($input.data('patient-id'));
+    const panelIndex = Number($input.data('panel-index') || 0);
+    const key = panelDomKey(patientId, panelIndex);
     const q = ($input.val() || '').trim();
-    const $suggest = $(`#tb-panel-suggest-${patientId}`);
+    const $suggest = $(`#tb-panel-suggest-${key}`);
 
     if (q.length < 2) {
       $suggest.addClass('d-none').html('');
@@ -1203,9 +2111,10 @@ function bindPanelBillingEvents() {
       const rows = items.map(x => `
         <div class="tb-panel-item"
              data-patient-id="${patientId}"
+             data-panel-index="${panelIndex}"
              data-center-id="${escHtml(x.CenterID)}"
              data-pname="${escHtml(x.pname)}"
-             data-comp-cat-id="${escHtml(x.CompCatID || '')}"
+             data-comp-cat-id="${escHtml(x.CompCatID ?? '')}"
              data-cat-details="${escHtml(x.CatDetails || '')}"
              data-billing-charge-mode="${escHtml(x.BillingChargeMode || '')}">
           <strong>${escHtml(x.pname)}</strong>
@@ -1218,28 +2127,36 @@ function bindPanelBillingEvents() {
 
   $('#tests-billing-sections').off('click', '.tb-panel-item').on('click', '.tb-panel-item', function () {
     const patientId = String($(this).data('patient-id'));
+    const panelIndex = Number($(this).data('panel-index') || 0);
+    const key = panelDomKey(patientId, panelIndex);
     const centerId = String($(this).data('center-id') || '');
     const pname = String($(this).data('pname') || '');
     const compCatId = String($(this).data('comp-cat-id') ?? '');
     const catDetails = String($(this).data('cat-details') || '');
     const billingChargeMode = String($(this).data('billing-charge-mode') || '');
 
-    $(`#tb-panel-input-${patientId}`).val(pname);
-    $(`#tb-panel-suggest-${patientId}`).addClass('d-none').html('');
+    $(`#tb-panel-input-${key}`).val(pname);
+    $(`#tb-panel-suggest-${key}`).addClass('d-none').html('');
 
     const tb = ensureTbObject(patientId);
-    tb.panel = { center_id: centerId, pname };
-    tb.billing = {
+    const section = getPanelSection(patientId, panelIndex);
+    const allowedChargeMode = normalizeChargeModeCode(billingChargeMode);
+    section.panel = { center_id: centerId, pname };
+    section.billing = {
       comp_cat_id: compCatId,
       cat_details: catDetails,
-      charge_mode_code: normalizeChargeModeCode(billingChargeMode)
+      allowed_charge_mode_code: allowedChargeMode,
+      charge_mode: allowedChargeMode,
+      charge_mode_code: allowedChargeMode,
+      selected_charge_mode: ''
     };
-    tb.selected_tests = [];
-    renderSelectedTestsForPatient(patientId);
-    $(`#tb-bill-id-${patientId}`).val(tb.billing.comp_cat_id);
-    $(`#tb-bill-name-${patientId}`).val(tb.billing.cat_details);
-    renderChargeModeControl(patientId, tb.billing);
-    $(`#tb-book-btn-${patientId}`).prop('disabled', !String(tb.billing.comp_cat_id || '').trim());
+    section.selected_tests = [];
+    syncPrimaryPanelFields(tb);
+    renderSelectedTestsForPanel(patientId, panelIndex);
+    $(`#tb-bill-id-${key}`).val(section.billing.comp_cat_id);
+    $(`#tb-bill-name-${key}`).val(section.billing.cat_details);
+    renderChargeModeControl(patientId, panelIndex, section.billing);
+    updatePatientBookButtons(patientId);
   });
 
   $(document).off('click.hcPanelClose').on('click.hcPanelClose', function (e) {
@@ -1250,39 +2167,110 @@ function bindPanelBillingEvents() {
 
   $('#tests-billing-sections').off('change', '.tb-charge-mode-select').on('change', '.tb-charge-mode-select', function () {
     const pid = String($(this).data('patient-id') || '');
+    const idx = Number($(this).data('panel-index') || 0);
     if (!pid) return;
     const tb = ensureTbObject(pid);
-    tb.billing = tb.billing || {};
+    const section = getPanelSection(pid, idx);
+    section.billing = section.billing || {};
     const selected = normalizeChargeModeCode($(this).val() || '');
-    tb.billing.selected_charge_mode = selected;
-    tb.billing.charge_mode_code = selected;
+    section.billing.selected_charge_mode = selected;
+    section.billing.charge_mode_code = selected;
+    syncPrimaryPanelFields(tb);
+  });
+
+  $('#tests-billing-sections').off('change', '.tb-patient-tbs').on('change', '.tb-patient-tbs', function () {
+    const pid = String($(this).data('patient-id') || '');
+    if (!pid) return;
+    const tb = ensureTbObject(pid);
+    tb.cce_level_tbs = normalizePatientTbs($(this).val());
+    updatePatientBookButtons(pid);
   });
 
   $('#tests-billing-sections').off('click', '.tb-open-panel-tests').on('click', '.tb-open-panel-tests', function () {
     const patientId = String($(this).data('patient-id'));
-    openPanelTestsModal(patientId);
+    const panelIndex = Number($(this).data('panel-index') || 0);
+    openPanelTestsModal(patientId, panelIndex);
+  });
+
+  $('#tests-billing-sections').off('click', '.tb-add-panel').on('click', '.tb-add-panel', function () {
+    const pid = String($(this).data('patient-id') || '');
+    if (!pid) return;
+    const tb = ensureTbObject(pid);
+    tb.panels.push(normalizePanelSection({ panel: null, billing: null, selected_tests: [] }));
+    renderTestsBilling();
+    const key = panelDomKey(pid, tb.panels.length - 1);
+    setTimeout(() => $(`#tb-panel-input-${key}`).trigger('focus'), 0);
+  });
+
+  $('#tests-billing-sections').off('click', '.tb-remove-panel').on('click', '.tb-remove-panel', function () {
+    const pid = String($(this).data('patient-id') || '');
+    const idx = Number($(this).data('panel-index') || 0);
+    if (!pid || idx <= 0) return;
+    const tb = ensureTbObject(pid);
+    tb.panels.splice(idx, 1);
+    syncPrimaryPanelFields(tb);
+    renderTestsBilling();
+  });
+
+  $('#tests-billing-sections').off('click', '.tb-attach-prescription').on('click', '.tb-attach-prescription', function () {
+    const pid = String($(this).data('patient-id') || '');
+    if (!pid) return;
+    $(`#tb-prescription-input-${pid}`).trigger('click');
+  });
+
+  $('#tests-billing-sections').off('change', '.tb-prescription-input').on('change', '.tb-prescription-input', function () {
+    const pid = String($(this).data('patient-id') || '');
+    const files = Array.from(this.files || []);
+    if (!pid || !files.length) return;
+
+    const formData = new FormData();
+    files.forEach((f) => formData.append('files', f));
+
+    const $btn = $(`.tb-attach-prescription[data-patient-id="${pid}"]`);
+    const $input = $(this);
+    $btn.prop('disabled', true).text('Uploading...');
+
+    $.ajax({
+      url: `/hhome-collection/patient/${pid}/prescriptions`,
+      method: 'POST',
+      data: formData,
+      processData: false,
+      contentType: false,
+      success: function () {
+        const map = wizardData.prescriptionUploads || {};
+        map[pid] = getLocalPrescriptionUploadCount(pid) + files.length;
+        wizardData.prescriptionUploads = map;
+        renderTestsBilling();
+      },
+      error: function (xhr) {
+        alert(xhr.responseJSON?.message || 'Prescription upload failed');
+      },
+      complete: function () {
+        $btn.prop('disabled', false).text('Attach Prescription');
+        $input.val('');
+      }
+    });
   });
 
   $('#tests-billing-sections').off('click', '.tb-remove-selected-test').on('click', '.tb-remove-selected-test', function () {
     const pid = String($(this).data('patient-id') || '');
-    const gcode = String($(this).data('gcode') || '');
-    const scode = String($(this).data('scode') || '');
+    const idx = Number($(this).data('panel-index') || 0);
     const booked = String($(this).data('booked-code') || '');
     if (!pid || !booked) return;
 
     const tb = ensureTbObject(pid);
-    const selected = tb.selected_tests || [];
-    tb.selected_tests = selected.filter((t) => {
-      const sameG = String(t.gcode || '') === gcode;
-      const sameS = String(t.scode || '') === scode;
-      const sameB = String(t.booked_code || t.test_code || '') === booked;
-      return !(sameG && sameS && sameB);
+    const section = getPanelSection(pid, idx);
+    const selected = section.selected_tests || [];
+    section.selected_tests = selected.filter((t) => {
+      const sameB = String(t.booked_code || '').trim() === booked;
+      return !sameB;
     });
-    renderSelectedTestsForPatient(pid);
+    syncPrimaryPanelFields(tb);
+    renderSelectedTestsForPanel(pid, idx);
   });
 }
 
-function renderSelectedTestsForPatient(patientId) {
+function legacySinglePanelRenderSelectedTestsForPatient(patientId) {
   const pid = String(patientId);
   const tb = ensureTbObject(pid);
   const selected = tb.selected_tests || [];
@@ -1292,7 +2280,7 @@ function renderSelectedTestsForPatient(patientId) {
     return;
   }
   const html = selected.map((t) => {
-    const code = (t.booked_code || t.test_code || '').toString().trim();
+    const code = (t.booked_code || '').toString().trim();
     const desc = (t.description || '').toString().trim();
     const label = [code, desc].filter(Boolean).join(' - ');
     return `
@@ -1303,8 +2291,6 @@ function renderSelectedTestsForPatient(patientId) {
           class="tb-remove-selected-test"
           aria-label="Remove"
           data-patient-id="${escHtml(pid)}"
-          data-gcode="${escHtml(String(t.gcode || ''))}"
-          data-scode="${escHtml(String(t.scode || ''))}"
           data-booked-code="${escHtml(code)}"
         >×</button>
       </span>
@@ -1313,10 +2299,10 @@ function renderSelectedTestsForPatient(patientId) {
   $(`#tb-selected-list-${pid}`).html(html);
 }
 
-function openPanelTestsModal(patientId) {
+function legacyOpenPanelTestsModal(patientId) {
   const pid = String(patientId);
   const tb = ensureTbObject(pid);
-  const compCatId = tb.billing?.comp_cat_id || '';
+  const compCatId = tb.billing?.comp_cat_id ?? '';
   if (!compCatId) {
     alert('Panel company select karke billing category load karein, phir Book Test karein.');
     return;
@@ -1333,9 +2319,12 @@ function openPanelTestsModal(patientId) {
       return acc;
     }, {})
   };
+  panelTestSearchQuery = '';
 
   const patientName = $(`#tb-patient-name-${pid}`).text() || `Patient ${pid}`;
   $('#panel-modal-meta').text(`Patient: ${patientName} | CompCatID: ${compCatId} | ${activePanelPicker.billingName}`);
+  $('#panel-test-search').val('');
+  $('#panel-test-search-note').text('Type 2 letters to search across all tests');
 
   $('#panel-groups-list').html('<div class="text-muted p-2">Loading groups...</div>');
   $('#panel-subgroups-list').html('<div class="text-muted p-2">Select group</div>');
@@ -1346,6 +2335,130 @@ function openPanelTestsModal(patientId) {
   panelTestsModal = new bootstrap.Modal(modalEl);
   panelTestsModal.show();
   loadPanelGroups();
+}
+
+function renderPanelTestsList(tests, emptyMessage) {
+  const list = Array.isArray(tests) ? tests : [];
+  if (!list.length) {
+    $('#panel-tests-list').html(`<div class="text-muted p-2">${escHtml(emptyMessage || 'No tests mapped')}</div>`);
+    return;
+  }
+
+  const modalSelected = activePanelPicker.tempSelected || {};
+  const selectedOwners = activePanelPicker.selectedOwners || {};
+  const html = list.map(t => {
+    const key = testSelKey(t);
+    const owner = selectedOwners[key];
+    const disabledByOtherPanel = owner && !owner.isCurrent;
+    const checked = modalSelected[key] ? 'checked' : '';
+    const disabled = disabledByOtherPanel ? 'disabled' : '';
+    const alreadyLine = disabledByOtherPanel
+      ? `<div class="panel-test-meta text-danger">Already selected in ${escHtml(owner.panelName || 'another panel')}</div>`
+      : '';
+    const childBtn = t.has_children
+      ? `<button type="button" class="panel-child-btn"
+            data-parent-gcode="${escHtml(t.gcode)}"
+            data-parent-scode="${escHtml(t.scode)}"
+            data-parent-test-code="${escHtml(t.test_code || '')}">
+            Child Tests
+         </button>`
+      : '';
+    const groupLine = [t.group_description, t.subgroup_description].filter(Boolean).join(' / ');
+    return `
+      <label class="panel-test-item">
+        <input type="checkbox" class="panel-test-check" ${checked} ${disabled}
+          data-gcode="${escHtml(t.gcode)}"
+          data-scode="${escHtml(t.scode)}"
+          data-test-code="${escHtml(t.test_code || '')}"
+          data-testcode1="${escHtml(t.testcode1 || '')}"
+          data-booked-code="${escHtml(t.booked_code || '')}"
+          data-description="${escHtml(t.description || '')}"
+          data-charge="${escHtml(t.charge || '')}"
+          data-mrp="${escHtml(t.mrp || '')}"
+          data-max-discount="${escHtml(t.max_discount || '')}"
+        />
+          <div class="panel-test-main">
+            <div><strong>${escHtml(t.description || '')}</strong></div>
+            <div class="panel-test-meta">
+              <span>${escHtml(t.booked_code || '')}</span>
+              ${groupLine ? `| <span>${escHtml(groupLine)}</span>` : ''}
+            </div>
+            <div class="panel-test-meta">Charge: ${escHtml(t.charge || 0)} | MRP: ${escHtml(t.mrp || 0)} | MaxDisc: ${escHtml(t.max_discount || 0)}</div>
+            ${alreadyLine}
+          </div>
+          ${childBtn ? `<div class="panel-test-actions">${childBtn}</div>` : ''}
+        </label>
+    `;
+  }).join('');
+
+  $('#panel-tests-list').html(html);
+
+  $('#panel-tests-list .panel-test-check').off('change').on('change', function () {
+    const pick = {
+      gcode: String($(this).data('gcode') || ''),
+      scode: String($(this).data('scode') || ''),
+      test_code: String($(this).data('test-code') || ''),
+      testcode1: String($(this).data('testcode1') || ''),
+      booked_code: String($(this).data('booked-code') || ''),
+      description: String($(this).data('description') || ''),
+      charge: Number($(this).data('charge') || 0),
+      mrp: Number($(this).data('mrp') || 0),
+      max_discount: Number($(this).data('max-discount') || 0)
+    };
+    const key = testSelKey(pick);
+    activePanelPicker.tempSelected = activePanelPicker.tempSelected || {};
+    if ($(this).is(':checked')) {
+      activePanelPicker.tempSelected[key] = pick;
+    } else {
+      delete activePanelPicker.tempSelected[key];
+    }
+  });
+
+  $('#panel-tests-list .panel-child-btn').off('click').on('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const parentGcode = String($(this).data('parent-gcode') || '');
+    const parentScode = String($(this).data('parent-scode') || '');
+    const parentTestCode = String($(this).data('parent-test-code') || '');
+    loadPanelChildTests(parentGcode, parentScode, parentTestCode);
+  });
+}
+
+function loadPanelTestsForCurrentView() {
+  const query = String(panelTestSearchQuery || '').trim();
+  if (query.length >= 2) {
+    const seq = ++panelTestSearchSeq;
+    $('#panel-tests-list').html('<div class="text-muted p-2">Searching tests...</div>');
+    $('#panel-child-tests-list').html('<div class="text-muted p-2">Search mode active</div>');
+    $('#panel-test-search-note').text(`Searching for "${query}" across all tests`);
+    $.get('/hhome-collection/panel-test-search', {
+      comp_cat_id: activePanelPicker.compCatId,
+      q: query,
+      limit: 50
+    }, function (res) {
+      if (seq !== panelTestSearchSeq) return;
+      const tests = res.tests || [];
+      renderPanelTestsList(tests, 'No matching tests found');
+    }).fail(function () {
+      if (seq !== panelTestSearchSeq) return;
+      $('#panel-tests-list').html('<div class="text-danger p-2">Search failed</div>');
+    });
+    return;
+  }
+  panelTestSearchSeq += 1;
+
+  $('#panel-test-search-note').text('Type 2 letters to search across all tests');
+  $('#panel-tests-list').html('<div class="text-muted p-2">Loading tests...</div>');
+  $('#panel-child-tests-list').html('<div class="text-muted p-2">Child Tests button se list khulegi</div>');
+  $.get('/hhome-collection/panel-tests', {
+    comp_cat_id: activePanelPicker.compCatId,
+    gcode: activePanelPicker.selectedGcode,
+    scode: activePanelPicker.selectedScode
+  }, function (res) {
+    renderPanelTestsList(res.tests || [], 'No tests mapped');
+  }).fail(function () {
+    $('#panel-tests-list').html('<div class="text-danger p-2">Load failed</div>');
+  });
 }
 
 function loadPanelGroups() {
@@ -1403,99 +2516,20 @@ function loadPanelSubgroups() {
       $('#panel-subgroups-list .panel-row-item').removeClass('active');
       $(this).addClass('active');
       activePanelPicker.selectedScode = String($(this).data('scode') || '');
-      loadPanelTests();
+      loadPanelTestsForCurrentView();
     });
 
     const first = subgroups[0];
     if (first && first.scode) {
       activePanelPicker.selectedScode = String(first.scode);
       $('#panel-subgroups-list .panel-subgroup-item').first().addClass('active');
-      loadPanelTests();
+      loadPanelTestsForCurrentView();
     }
   });
 }
 
 function loadPanelTests() {
-  $('#panel-tests-list').html('<div class="text-muted p-2">Loading tests...</div>');
-  $('#panel-child-tests-list').html('<div class="text-muted p-2">Child Tests button se list khulegi</div>');
-  $.get('/hhome-collection/panel-tests', {
-    comp_cat_id: activePanelPicker.compCatId,
-    gcode: activePanelPicker.selectedGcode,
-    scode: activePanelPicker.selectedScode
-  }, function (res) {
-    const tests = res.tests || [];
-    if (!tests.length) {
-      $('#panel-tests-list').html('<div class="text-muted p-2">No tests mapped</div>');
-      return;
-    }
-
-    const modalSelected = activePanelPicker.tempSelected || {};
-
-    const html = tests.map(t => {
-      const key = testSelKey(t);
-      const checked = modalSelected[key] ? 'checked' : '';
-      const childBtn = t.has_children
-        ? `<button type="button" class="panel-child-btn"
-              data-parent-gcode="${escHtml(t.gcode)}"
-              data-parent-scode="${escHtml(t.scode)}"
-              data-parent-test-code="${escHtml(t.test_code || '')}">
-              Child Tests
-           </button>`
-        : '';
-      return `
-        <label class="panel-test-item">
-          <input type="checkbox" class="panel-test-check" ${checked}
-            data-gcode="${escHtml(t.gcode)}"
-            data-scode="${escHtml(t.scode)}"
-            data-test-code="${escHtml(t.test_code || '')}"
-            data-testcode1="${escHtml(t.testcode1 || '')}"
-            data-booked-code="${escHtml(t.booked_code || '')}"
-            data-description="${escHtml(t.description || '')}"
-            data-charge="${escHtml(t.charge || '')}"
-            data-mrp="${escHtml(t.mrp || '')}"
-            data-max-discount="${escHtml(t.max_discount || '')}"
-          />
-            <div class="panel-test-main">
-              <div><strong>${escHtml(t.booked_code || '')}</strong> - ${escHtml(t.description || '')}</div>
-              <div class="panel-test-meta">Charge: ${escHtml(t.charge || 0)} | MRP: ${escHtml(t.mrp || 0)} | MaxDisc: ${escHtml(t.max_discount || 0)}</div>
-            </div>
-            ${childBtn ? `<div class="panel-test-actions">${childBtn}</div>` : ''}
-          </label>
-      `;
-    }).join('');
-
-    $('#panel-tests-list').html(html);
-
-    $('#panel-tests-list .panel-test-check').off('change').on('change', function () {
-      const pick = {
-        gcode: String($(this).data('gcode') || ''),
-        scode: String($(this).data('scode') || ''),
-        test_code: String($(this).data('test-code') || ''),
-        testcode1: String($(this).data('testcode1') || ''),
-        booked_code: String($(this).data('booked-code') || ''),
-        description: String($(this).data('description') || ''),
-        charge: Number($(this).data('charge') || 0),
-        mrp: Number($(this).data('mrp') || 0),
-        max_discount: Number($(this).data('max-discount') || 0)
-      };
-      const key = testSelKey(pick);
-      activePanelPicker.tempSelected = activePanelPicker.tempSelected || {};
-      if ($(this).is(':checked')) {
-        activePanelPicker.tempSelected[key] = pick;
-      } else {
-        delete activePanelPicker.tempSelected[key];
-      }
-    });
-
-    $('#panel-tests-list .panel-child-btn').off('click').on('click', function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      const parentGcode = String($(this).data('parent-gcode') || '');
-      const parentScode = String($(this).data('parent-scode') || '');
-      const parentTestCode = String($(this).data('parent-test-code') || '');
-      loadPanelChildTests(parentGcode, parentScode, parentTestCode);
-    });
-  });
+  loadPanelTestsForCurrentView();
 }
 
 function loadPanelChildTests(parentGcode, parentScode, parentTestCode) {
@@ -1547,13 +2581,165 @@ function loadPanelChildTests(parentGcode, parentScode, parentTestCode) {
   });
 }
 
+function renderSelectedTestsForPatient(patientId) {
+  renderSelectedTestsForPanel(patientId, 0);
+}
+
+function renderSelectedTestsForPanel(patientId, panelIndex) {
+  const pid = String(patientId);
+  const idx = Number(panelIndex || 0);
+  const key = panelDomKey(pid, idx);
+  const section = getPanelSection(pid, idx);
+  const selected = section.selected_tests || [];
+  $(`#tb-selected-count-${key}`).text(selected.length);
+  if (!selected.length) {
+    $(`#tb-selected-list-${key}`).html('<div class="text-muted">No tests selected yet</div>');
+    return;
+  }
+  const html = selected.map((t) => {
+    const code = (t.booked_code || '').toString().trim();
+    const desc = (t.description || '').toString().trim();
+    const label = [code, desc].filter(Boolean).join(' - ');
+    return `
+      <span class="badge text-bg-light border me-1 mb-1 d-inline-flex align-items-center gap-1">
+        ${escHtml(label || 'Test')}
+        <button
+          type="button"
+          class="tb-remove-selected-test"
+          aria-label="Remove"
+          data-patient-id="${escHtml(pid)}"
+          data-panel-index="${idx}"
+          data-booked-code="${escHtml(code)}"
+        >x</button>
+      </span>
+    `;
+  }).join('');
+  $(`#tb-selected-list-${key}`).html(html);
+}
+
+function selectedTestOwnerMap(patientId, currentPanelIndex) {
+  const map = {};
+  getPatientPanels(patientId).forEach((section, idx) => {
+    (section.selected_tests || []).forEach((t) => {
+      const code = testSelKey(t);
+      if (!code) return;
+      map[code] = {
+        panelIndex: idx,
+        panelName: section.panel?.pname || `Panel ${idx + 1}`,
+        isCurrent: Number(idx) === Number(currentPanelIndex || 0)
+      };
+    });
+  });
+  return map;
+}
+
+function openPanelTestsModal(patientId, panelIndex = 0) {
+  const pid = String(patientId);
+  const idx = Number(panelIndex || 0);
+  const section = getPanelSection(pid, idx);
+  const compCatId = section.billing?.comp_cat_id ?? '';
+  if (!compCatId) {
+    alert('Panel company select karke billing category load karein, phir Book Test karein.');
+    return;
+  }
+
+  activePanelPicker = {
+    patientId: pid,
+    panelIndex: idx,
+    compCatId,
+    billingName: section.billing?.cat_details || '',
+    selectedGcode: '',
+    selectedScode: '',
+    selectedOwners: selectedTestOwnerMap(pid, idx),
+    tempSelected: (section.selected_tests || []).reduce((acc, t) => {
+      acc[testSelKey(t)] = t;
+      return acc;
+    }, {})
+  };
+  panelTestSearchQuery = '';
+
+  const patientName = $(`#tb-patient-name-${pid}`).text() || `Patient ${pid}`;
+  const panelName = section.panel?.pname || `Panel ${idx + 1}`;
+  $('#panel-modal-meta').text(`Patient: ${patientName} | Panel: ${panelName} | CompCatID: ${compCatId} | ${activePanelPicker.billingName}`);
+  $('#panel-test-search').val('');
+  $('#panel-test-search-note').text('Type 2 letters to search across all tests');
+
+  $('#panel-groups-list').html('<div class="text-muted p-2">Loading groups...</div>');
+  $('#panel-subgroups-list').html('<div class="text-muted p-2">Select group</div>');
+  $('#panel-tests-list').html('<div class="text-muted p-2">Select subgroup</div>');
+  $('#panel-child-tests-list').html('<div class="text-muted p-2">Child Tests button se list khulegi</div>');
+
+  const modalEl = document.getElementById('panelTestsModal');
+  panelTestsModal = new bootstrap.Modal(modalEl);
+  panelTestsModal.show();
+  loadPanelGroups();
+}
+
 function applySelectedPanelTests() {
   const pid = String(activePanelPicker.patientId || '');
+  const idx = Number(activePanelPicker.panelIndex || 0);
   if (!pid) return;
   const tb = ensureTbObject(pid);
-  tb.selected_tests = Object.values(activePanelPicker.tempSelected || {});
-  renderSelectedTestsForPatient(pid);
+  const section = getPanelSection(pid, idx);
+  section.selected_tests = Object.values(activePanelPicker.tempSelected || {}).map((t) => ({
+    booked_code: String(t.booked_code || t.testcode1 || t.test_code || '').trim(),
+    description: String(t.description || '').trim(),
+    charge: Number(t.charge || 0),
+    mrp: Number(t.mrp || 0),
+    max_discount: Number(t.max_discount || 0)
+  })).filter((t) => !!t.booked_code);
+  syncPrimaryPanelFields(tb);
+  renderSelectedTestsForPanel(pid, idx);
   if (panelTestsModal) panelTestsModal.hide();
+}
+
+function renderPanelSectionHtml(pid, panelIndex) {
+  const idx = Number(panelIndex || 0);
+  const key = panelDomKey(pid, idx);
+  const section = getPanelSection(pid, idx);
+  const panel = section.panel || {};
+  const billing = section.billing || {};
+  const chargeModeDisplay = chargeModeLabel(billing.selected_charge_mode || billing.charge_mode_code || billing.charge_mode || '');
+  const selectedCount = (section.selected_tests || []).length;
+  const removeBtn = idx > 0
+    ? `<button type="button" class="btn btn-outline-danger btn-sm tb-remove-panel" data-patient-id="${escHtml(pid)}" data-panel-index="${idx}">Remove</button>`
+    : '';
+  const label = idx === 0 ? 'Primary Panel' : `Additional Panel ${idx}`;
+
+  return `
+    <div class="tb-panel-section border rounded p-2 mb-2" data-patient-id="${escHtml(pid)}" data-panel-index="${idx}">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <strong>${label}</strong>
+        ${removeBtn}
+      </div>
+      <div class="row g-2">
+        <div class="col-md-4 tb-panel-wrap">
+          <label class="form-label">Panel Company</label>
+          <input id="tb-panel-input-${key}" class="form-control tb-panel-search" data-patient-id="${escHtml(pid)}" data-panel-index="${idx}" value="${escHtml(panel.pname || '')}" placeholder="Type panel company (min 2 chars)">
+          <div id="tb-panel-suggest-${key}" class="tb-panel-suggest d-none"></div>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Billing Category ID</label>
+          <input id="tb-bill-id-${key}" class="form-control" value="${escHtml(billing.comp_cat_id ?? '')}" readonly>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Billing Category</label>
+          <input id="tb-bill-name-${key}" class="form-control" value="${escHtml(billing.cat_details || '')}" readonly>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Charge Mode</label>
+          <div id="tb-charge-mode-${key}" class="tb-charge-mode-view">${escHtml(chargeModeDisplay)}</div>
+        </div>
+        <div class="col-md-12 d-flex align-items-center justify-content-between">
+          <div class="small text-muted">Selected tests: <strong id="tb-selected-count-${key}">${selectedCount}</strong></div>
+          <button id="tb-book-btn-${key}" class="btn btn-dark btn-sm tb-open-panel-tests" data-patient-id="${escHtml(pid)}" data-panel-index="${idx}" ${String(billing.comp_cat_id ?? '').trim() ? '' : 'disabled'}>Book Test</button>
+        </div>
+        <div class="col-12">
+          <div id="tb-selected-list-${key}" class="tb-tests-readonly"></div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderTestsBilling() {
@@ -1567,44 +2753,39 @@ function renderTestsBilling() {
     const html = list.map(p => {
       const pid = String(p.patient_id);
       const existing = ensureTbObject(pid);
-      if ((!existing.panel || !existing.panel.pname) && p.panel_company) {
-        existing.panel = existing.panel || {};
-        existing.panel.pname = p.panel_company;
+      const selectedTbs = normalizePatientTbs(existing.cce_level_tbs);
+      const localUploadCount = getLocalPrescriptionUploadCount(pid);
+      const firstSection = getPanelSection(pid, 0);
+      if ((!firstSection.panel || !firstSection.panel.pname) && p.panel_company) {
+        firstSection.panel = firstSection.panel || {};
+        firstSection.panel.pname = p.panel_company;
+        syncPrimaryPanelFields(existing);
       }
-      const panel = existing.panel || {};
-      const billing = existing.billing || {};
-      const chargeModeDisplay = chargeModeLabel(billing.charge_mode_code || billing.charge_mode || '');
-      const selectedCount = (existing.selected_tests || []).length;
       return `
       <div class="card mb-2">
         <div class="card-body">
-          <h6 id="tb-patient-name-${pid}">${escHtml(p.full_name || '')}</h6>
-          <div class="row g-2">
-            <div class="col-md-4 tb-panel-wrap">
-              <label class="form-label">Panel Company</label>
-              <input id="tb-panel-input-${pid}" class="form-control tb-panel-search" data-patient-id="${pid}" value="${escHtml(panel.pname || '')}" placeholder="Type panel company (min 2 chars)">
-              <div id="tb-panel-suggest-${pid}" class="tb-panel-suggest d-none"></div>
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+            <h6 id="tb-patient-name-${pid}" class="mb-0">Patient name: ${escHtml(p.full_name || '')}</h6>
+            <div class="d-flex align-items-center gap-2">
+              <label class="form-label mb-0 fw-bold" for="tb-patient-tbs-${pid}">Test_Booking_Status <span class="text-danger">*</span></label>
+              <select id="tb-patient-tbs-${pid}" class="form-select form-select-sm tb-patient-tbs" data-patient-id="${escHtml(pid)}" style="min-width: 220px; max-width: 240px;">
+                <option value="">Select status</option>
+                ${PATIENT_TBS_OPTIONS.map((opt) => `<option value="${opt.code}" ${selectedTbs === opt.code ? 'selected' : ''}>${escHtml(opt.label)}</option>`).join('')}
+              </select>
             </div>
-            <div class="col-md-3">
-              <label class="form-label">Billing Category ID</label>
-              <input id="tb-bill-id-${pid}" class="form-control" value="${escHtml(billing.comp_cat_id || '')}" readonly>
+          </div>
+          <div class="tb-panel-sections">
+            ${existing.panels.map((_, idx) => renderPanelSectionHtml(pid, idx)).join('')}
+          </div>
+          <div class="d-flex justify-content-end align-items-center gap-2 mt-2">
+            <div id="tb-prescription-upload-count-${pid}" class="small text-success ${localUploadCount ? '' : 'd-none'}">
+              Uploaded in this booking: ${localUploadCount}
             </div>
-            <div class="col-md-3">
-              <label class="form-label">Billing Category</label>
-              <input id="tb-bill-name-${pid}" class="form-control" value="${escHtml(billing.cat_details || '')}" readonly>
-            </div>
-            <div class="col-md-2">
-              <label class="form-label">Charge Mode</label>
-              <div id="tb-charge-mode-${pid}" class="tb-charge-mode-view">${escHtml(chargeModeDisplay)}</div>
-            </div>
-
-            <div class="col-md-12 d-flex align-items-center justify-content-between">
-              <div class="small text-muted">Selected tests: <strong id="tb-selected-count-${pid}">${selectedCount}</strong></div>
-              <button id="tb-book-btn-${pid}" class="btn btn-dark btn-sm tb-open-panel-tests" data-patient-id="${pid}" ${String(billing.comp_cat_id ?? '').trim() ? '' : 'disabled'}>Book Test</button>
-            </div>
-            <div class="col-12">
-              <div id="tb-selected-list-${pid}" class="tb-tests-readonly"></div>
-            </div>
+            <input id="tb-prescription-input-${pid}" type="file" class="d-none tb-prescription-input" data-patient-id="${pid}" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple>
+            <button type="button" class="btn btn-dark btn-sm tb-attach-prescription tb-compact-action" data-patient-id="${pid}">
+              Attach Prescription
+            </button>
+            <button type="button" class="btn btn-outline-primary btn-sm tb-add-panel tb-compact-action" data-patient-id="${pid}">+ Add Panel</button>
           </div>
         </div>
       </div>`;
@@ -1613,21 +2794,52 @@ function renderTestsBilling() {
     $('#tests-billing-sections').html(html);
     list.forEach(p => {
       const pid = String(p.patient_id);
-      renderSelectedTestsForPatient(pid);
       const tb = ensureTbObject(pid);
-      if (tb.billing) renderChargeModeControl(pid, tb.billing);
+      tb.panels.forEach((section, idx) => {
+        renderSelectedTestsForPanel(pid, idx);
+        if (section.billing) renderChargeModeControl(pid, idx, section.billing);
+      });
+      updatePatientBookButtons(pid);
     });
-    list.forEach(p => autoResolveBillingFromPanel(String(p.patient_id), p.panel_company || ''));
+    list.forEach(p => autoResolveBillingFromPanel(String(p.patient_id), p.panel_company || '', 0));
   });
 }
 
 function goStep4() {
   const tb = wizardData.testsBilling || {};
 
-  const missingPanel = Object.keys(tb).find(pid => !tb[pid]?.panel?.pname || !tb[pid]?.billing?.comp_cat_id);
-  if (missingPanel) {
-    alert('Har selected patient ke liye panel company select karke billing category load karna required hai.');
-    return;
+  for (const pid of Object.keys(tb)) {
+    const patientTb = ensureTbObject(pid);
+    const tbsCode = normalizePatientTbs(patientTb.cce_level_tbs);
+    if (!tbsCode) {
+      alert('Each patient must have a Test Booking Status selected.');
+      return;
+    }
+    if (tbsCode === 3) {
+      continue;
+    }
+    const seenCodes = {};
+    for (let idx = 0; idx < patientTb.panels.length; idx += 1) {
+      const section = getPanelSection(pid, idx);
+      if (!section?.panel?.pname || !section?.billing?.comp_cat_id) {
+        alert('Har panel section ke liye panel company select karke billing category load karna required hai.');
+        return;
+      }
+      const selectedMode = normalizeChargeModeCode(section.billing.selected_charge_mode || section.billing.charge_mode_code || '');
+      if (!selectedMode || selectedMode.length > 1) {
+        alert('Har panel section ke liye Credit ya Paying charge mode select karna required hai.');
+        return;
+      }
+      for (const t of section.selected_tests || []) {
+        const code = testSelKey(t);
+        if (!code) continue;
+        if (seenCodes[code] !== undefined) {
+          alert(`Test ${code} same patient ke liye already dusre panel me selected hai.`);
+          return;
+        }
+        seenCodes[code] = idx;
+      }
+    }
   }
 
   wizardData.testsBilling = tb;
@@ -1638,6 +2850,8 @@ function renderReview() {
   $.get('/hhome-collection/summary', function (res) {
     if (!res.ok) {
       $('#booking-summary').html('Summary not available');
+      $('#review-appointment-line').html('');
+      $('#review-net-amount').html('');
       return;
     }
 
@@ -1646,59 +2860,150 @@ function renderReview() {
       const patients = res.selected_patients || [];
       const addr = res.selected_address || {};
       const ap = wizardData.appointment || {};
+      const addressParts = [
+        addr.house_flat_no ? { k: 'House/Flat No', v: escHtml(addr.house_flat_no) } : null,
+        (addr.floor_display || addr.floor) ? { k: 'Floor', v: escHtml(addr.floor_display || addr.floor) } : null,
+        addr.block_tower_no ? { k: 'Block/Tower No', v: escHtml(addr.block_tower_no) } : null,
+        (addr.street_sector || addr.street_line) ? { k: 'Street/Sector', v: escHtml(addr.street_sector || addr.street_line) } : null,
+        addr.landmark ? { k: 'Landmark', v: escHtml(addr.landmark) } : null,
+        addr.city ? { k: 'City', v: escHtml(addr.city) } : null,
+        (addr.colony_name || addr.colony_name_snapshot) ? { k: 'Colony', v: escHtml(addr.colony_name || addr.colony_name_snapshot) } : null,
+        addr.pincode ? { k: 'Pincode', v: escHtml(addr.pincode) } : null,
+        (addr.route_no || addr.route_no_snapshot) ? { k: 'Route', v: escHtml(addr.route_no || addr.route_no_snapshot) } : null
+      ].filter(Boolean);
+      const addressRowsHtml = addressParts.length
+        ? addressParts.map((x) => `<div class="hc-review-addr-item"><span class="hc-review-addr-k">${x.k}:</span> <span class="hc-review-addr-v">${x.v}</span></div>`).join('')
+        : '<div class="hc-review-addr-item">-</div>';
+      const mobile = String(caller.primary_mobile || '').trim() || '-';
+      const apDate = formatReviewDateDay(ap.preferred_visit_date || '');
+      const apSlot = formatSlotCompact(ap.preferred_time_slot || '');
+      $('#review-appointment-line').html(`<span class="hc-review-appointment-chip">Appointment: ${escHtml(apDate)} | ${escHtml(apSlot)}</span>`);
 
       $('#booking-summary').html(`
-        <strong>Caller:</strong> ${caller.full_name || '-'} | 
-        <strong>Patients:</strong> ${patients.length} | 
-        <strong>Address:</strong> ${addr.house_flat_no || ''}, ${addr.colony_name_snapshot || ''}<br>
-        <strong>Appointment:</strong> ${ap.preferred_visit_date || '-'} ${ap.preferred_time_slot || '-'}
+        <div class="hc-review-grid">
+          <div class="hc-review-meta">
+            <div><strong>Caller:</strong> ${escHtml(mobile)} | <strong>Patients:</strong> ${patients.length}</div>
+            <div><strong>Google Location:</strong> <span class="hc-review-linkish">${escHtml(addr.google_location || '-')}</span></div>
+            <div><strong>Referred By:</strong> ${escHtml(ap.referred_by || '-')}</div>
+            <div><strong>Internal Referred By:</strong> ${escHtml(ap.internal_ref || '-')}</div>
+            <div><strong>Lead ID:</strong> ${escHtml(ap.lead_id || '-')}</div>
+          </div>
+          <div class="hc-review-address-card">
+            <div class="hc-review-address-title">Address:-</div>
+            <div class="hc-review-address-grid">${addressRowsHtml}</div>
+          </div>
+        </div>
       `);
 
+      let subTotalAmount = 0;
+      let discountAmount = 0;
       const rows = patients.map(p => {
-        const tb = wizardData.testsBilling[p.patient_id] || wizardData.testsBilling[String(p.patient_id)] || {};
-        const panelName = tb?.panel?.pname || '-';
-        const billing = tb?.billing || {};
-        const selectedTests = tb?.selected_tests || [];
-        const testCount = selectedTests.length;
-        const testsHtml = renderReviewTestsHtml(selectedTests, catalog);
+        const pid = String(p.patient_id);
+        const tb = ensureTbObject(pid);
+        const patientTbs = tbsLabel(tb?.cce_level_tbs);
+        const patientTubeSet = new Set();
+        let patientTotal = 0;
+        const panelRows = tb.panels.map((section, idx) => {
+          const panelName = section?.panel?.pname || `Panel ${idx + 1}`;
+          const billing = section?.billing || {};
+          const selectedTests = section?.selected_tests || [];
+          const testCount = selectedTests.length;
+          const testsSummary = renderReviewTestsHtml(selectedTests, catalog);
+          const chargeMode = chargeModeLabel(billing.selected_charge_mode || billing.charge_mode_code || '');
+          patientTotal += Number(testsSummary.total || 0);
+          subTotalAmount += Number(testsSummary.subtotal || 0);
+          discountAmount += Number(testsSummary.discountTotal || 0);
+          (testsSummary.tubes || []).forEach((tube) => {
+            const k = String(tube || '').trim().toLowerCase();
+            if (k) patientTubeSet.add(tube);
+          });
+          return `
+            <div class="border rounded p-2 mb-2 bg-white">
+              <div class="d-flex flex-wrap gap-3 align-items-center mb-2 hc-review-top-strip">
+                <span class="hc-review-panel-chip">${escHtml(panelName)}</span>
+                <span class="hc-review-charge-chip">${escHtml(chargeMode)}</span>
+                <span><strong>Test_Bkg_Status:</strong> <span style="color:#0b6b2d;font-weight:700;">${escHtml(patientTbs)}</span></span>
+              </div>
+              <div class="mb-1"><strong>Tests (${testCount}):</strong></div>
+              ${testsSummary.html}
+              <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip">
+                <div class="ms-auto text-end"><strong>Charges: ${escHtml(formatCharge(testsSummary.total))}</strong></div>
+              </div>
+            </div>
+          `;
+        }).join('');
+        const patientTubes = Array.from(patientTubeSet);
+        const patientTubesText = patientTubes.length ? patientTubes.join(', ') : '-';
         return `
         <div class="card mb-2">
           <div class="card-body">
-            <h6>${p.full_name}</h6>
-            <div><strong>Panel:</strong> ${panelName}</div>
-            <div><strong>Billing Category:</strong> ${billing.comp_cat_id || '-'} ${billing.cat_details ? `(${billing.cat_details})` : ''}</div>
-            <div><strong>Tests (${testCount}):</strong> ${testsHtml}</div>
+            <h6 class="hc-patient-name-red"><span>Patient Name:</span> ${escHtml(p.full_name || '')}</h6>
+            ${panelRows || '<div class="text-muted">No panel data.</div>'}
+            <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip hc-review-bottom-strip-patient">
+              <div><strong>Sample Tubes:</strong> ${escHtml(patientTubesText)}</div>
+              <div class="text-end"><strong>Total Amount: ${escHtml(formatCharge(patientTotal))}</strong></div>
+            </div>
           </div>
         </div>`;
       }).join('');
 
       $('#review-patient-sections').html(rows || '<div class="text-muted">No patient data.</div>');
+      const computedNet = Math.max(0, Number(subTotalAmount || 0) - Number(discountAmount || 0));
+      $('#review-net-amount').html(`
+        <span class="hc-review-total-line"><strong>Final Sub Total:</strong> ${escHtml(formatCharge(subTotalAmount))}</span>
+        <span class="hc-review-total-line"><strong>Final Discount:</strong> ${escHtml(formatCharge(discountAmount))}</span>
+        <span class="hc-review-net-chip"><strong>Final Amount:</strong> ${escHtml(formatCharge(computedNet))}</span>
+      `);
     });
   });
 }
 
 function confirmBooking() {
+  syncAppointmentTagsFromTopBar();
   $.get('/hhome-collection/selected-patients', function (res) {
+    const selectedPatients = res.selected_patients || [];
+    for (const p of selectedPatients) {
+      const pid = String(p.patient_id || '');
+      const tb = ensureTbObject(pid);
+      const tbsCode = normalizePatientTbs(tb.cce_level_tbs);
+      const count = Number(p.staged_prescription_file_count || 0);
+      if (tbsCode === 2 && count <= 0) {
+        alert(`${p.full_name || pid} prescription upload is pending...`);
+        return;
+      }
+    }
+
     const testsMetaMap = {};
-    (res.selected_patients || []).forEach(p => {
-      const tb = wizardData.testsBilling[p.patient_id] || wizardData.testsBilling[String(p.patient_id)] || {};
+    selectedPatients.forEach(p => {
+      const tb = ensureTbObject(String(p.patient_id));
       testsMetaMap[p.patient_id] = {
+        cce_level_tbs: normalizePatientTbs(tb.cce_level_tbs),
         panel: tb.panel || null,
         billing: tb.billing || null,
-        selected_tests: tb.selected_tests || []
+        selected_tests: tb.selected_tests || [],
+        panels: (tb.panels || []).map((section) => ({
+          panel: section.panel || null,
+          billing: section.billing || null,
+          selected_tests: section.selected_tests || []
+        }))
       };
     });
 
     const payload = {
       preferred_visit_date: wizardData.appointment.preferred_visit_date,
       preferred_time_slot: wizardData.appointment.preferred_time_slot,
-      special_instructions: `Referred By: ${wizardData.appointment.referred_by || ''}, Internal Ref: ${wizardData.appointment.internal_ref || ''}`,
+      referred_by: wizardData.appointment.referred_by || '',
+      intrnl_rfrncd_by: wizardData.appointment.internal_ref || '',
+      lead_id: wizardData.appointment.lead_id || '',
       remarks: wizardData.appointment.remarks || '',
+      permanent_tags: wizardData.appointment.permanent_tags || '',
+      booking_tags: wizardData.appointment.booking_tags || '',
       patient_tests_meta_map: testsMetaMap
     };
 
+    const isModify = Number(wizardData?.modify?.booking_id || 0) > 0;
     $.ajax({
-      url: '/hhome-collection/confirm-booking',
+      url: isModify ? '/hhome-collection/modify-booking' : '/hhome-collection/confirm-booking',
       method: 'POST',
       contentType: 'application/json',
       data: JSON.stringify(payload),
@@ -1706,9 +3011,13 @@ function confirmBooking() {
         $.get(`/hhome-collection/success?booking_id=${r.booking_id}`, function (html) {
           $('#wizard-left-panel').html(html);
           setLayoutForSuccess();
-          $('#right-panel').html('');
+          $('#linked-patients-panel').html('');
+          $('#reference-addresses-panel').html('');
           $('.step-pill').removeClass('active');
-          wizardData = { appointment: {}, testsBilling: {} };
+          wizardData = { searchedMobile: '', appointment: {}, testsBilling: {}, prescriptionUploads: {}, modify: {} };
+          selectedPatientTags = [];
+          selectedPermanentTags = [];
+          selectedBookingTags = [];
         });
       },
       error: function (xhr) {
@@ -1720,15 +3029,16 @@ function confirmBooking() {
 
 $(function () {
   if (!$('#wizard-left-panel').length) return;
+  bindCallerHistoryChipEvents();
   setStep(1);
-  renderRightPanelState([]);
+  renderRightPanelState([], [], null);
 
   $(document).on('click', '.step-pill', function () {
     const step = Number($(this).data('step'));
+    syncAppointmentFromStep2Inputs();
+    if (step >= 3) {
+      syncAppointmentTagsFromTopBar();
+    }
     if (step >= 1 && step <= 4) setStep(step);
   });
 });
-
-
-
-

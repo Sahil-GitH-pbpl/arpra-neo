@@ -88,6 +88,10 @@ def cancel_booking():
         reason_text=reason_text,
         actor_user_id=session.get("user_id"),
         appointment_id=appointment_id,
+        reschedule_requested=bool(int(payload.get("reschedule_requested", 0) or 0)),
+        new_slot_known=bool(int(payload.get("new_slot_known", 0) or 0)),
+        proposed_visit_date=(payload.get("proposed_visit_date") or "").strip(),
+        proposed_time_slot=(payload.get("proposed_time_slot") or "").strip(),
     )
     status = 200 if result["ok"] else 400
     return jsonify(result), status
@@ -129,5 +133,19 @@ def modify_init():
             session=session,
             actor_user_id=session.get("user_id"),
         )
+    status = 200 if result.get("ok") else 400
+    return jsonify(result), status
+
+
+@hhome_collection_dashboard_bp.post("/hhome-collection/reschedule-booking")
+def reschedule_booking():
+    payload = request.get_json(silent=True) or {}
+    result = service.reschedule_booking(
+        booking_id=int(payload.get("booking_id", 0)),
+        preferred_visit_date=(payload.get("preferred_visit_date") or "").strip(),
+        preferred_time_slot=(payload.get("preferred_time_slot") or "").strip(),
+        reason_text=(payload.get("reason_text") or "").strip(),
+        actor_user_id=session.get("user_id"),
+    )
     status = 200 if result.get("ok") else 400
     return jsonify(result), status
