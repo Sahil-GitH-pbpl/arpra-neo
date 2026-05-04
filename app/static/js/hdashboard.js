@@ -2,13 +2,14 @@ function statusBadge(status) {
   const map = {
     0: { text: 'Pending', cls: 'secondary' },
     1: { text: 'Assigned', cls: 'warning' },
-    2: { text: 'Started', cls: 'primary' },
+    2: { text: 'Started', cls: 'started' },
     3: { text: 'Completed', cls: 'success' },
     4: { text: 'Cancelled', cls: 'danger' }
   };
   const legacyMap = { Pending: 0, Assigned: 1, Started: 2, Completed: 3, Cancelled: 4 };
   const code = Number.isFinite(Number(status)) ? Number(status) : legacyMap[status];
   const meta = map[code] || map[0];
+  if (code === 2) return `<span class="badge text-bg-${meta.cls}" style="background:#7f2eb4 !important;">${meta.text}</span>`;
   return `<span class="badge text-bg-${meta.cls}">${meta.text}</span>`;
 }
 
@@ -144,9 +145,10 @@ function resetDashboardPageState() {
 }
 
 function loadDashboard() {
+  const dr = getDashboardDateRange();
   const params = {
-    date_from: $('#f-date-from').val(),
-    date_to: $('#f-date-to').val(),
+    date_from: dr.from,
+    date_to: dr.to,
     status: $('#f-status').val(),
     search: $('#f-search').val()
   };
@@ -154,11 +156,43 @@ function loadDashboard() {
   return $.get('/hhome-collection/dashboard-data', params, function (res) {
     const rows = res.rows || [];
     renderDashboardRows(rows);
+    renderDashboardMiniStats(rows);
   });
 }
 
 let dashboardRowsState = [];
 let dashboardSortState = { key: '', dir: 'asc' };
+let dashboardDateSelection = [];
+
+function toIsoLocalDate(d) {
+  const dt = d instanceof Date ? d : new Date(d);
+  if (Number.isNaN(dt.getTime())) return '';
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const day = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function getDashboardDateRange() {
+  if (!Array.isArray(dashboardDateSelection) || dashboardDateSelection.length === 0) {
+    const today = todayIsoLocal();
+    return { from: today, to: today };
+  }
+  const from = toIsoLocalDate(dashboardDateSelection[0]);
+  const to = toIsoLocalDate(dashboardDateSelection[1] || dashboardDateSelection[0]);
+  return { from, to };
+}
+
+function renderDashboardMiniStats(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const pending = list.filter((r) => Number(r.booking_status || 0) === 0).length;
+  const started = list.filter((r) => Number(r.booking_status || 0) === 2).length;
+  const cancelled = list.filter((r) => Number(r.booking_status || 0) === 4).length;
+  $('#dash-chip-total').text(list.length);
+  $('#dash-chip-pending').text(pending);
+  $('#dash-chip-started').text(started);
+  $('#dash-chip-cancelled').text(cancelled);
+}
 
 function sortRows(rows) {
   const list = [...(rows || [])];
@@ -202,7 +236,7 @@ function renderDashboardRows(rows) {
               ${r.row_type === 'APPOINTMENT' ? `[A${r.appointment_no || '-'}] ` : ''}${patientText}
               ${hasPatientTag ? '<span class="dash-patient-tag-indicator" title="One or more patient tags exist">*</span>' : ''}
             </div>
-            <div class="dash-mobile-sub">(${mobileText})</div>
+            <div class="dash-mobile-sub">${mobileText}</div>
           </div>
         </td>
         <td>${txnTag ? `<span class="dash-txn-tag-chip">${txnTag}</span>` : '-'}</td>
@@ -211,7 +245,7 @@ function renderDashboardRows(rows) {
         <td>
           <div class="dash-route-merge">
             <div>${colonyText}</div>
-            <div class="dash-route-sub">(${routeText})</div>
+            <div class="dash-route-sub">${routeText}</div>
           </div>
         </td>
         <td><strong>${Number(r.total_amount || 0).toFixed(2).replace(/\.00$/, '')}</strong></td>
@@ -712,8 +746,32 @@ $(function () {
   });
 
   const today = todayIsoLocal();
-  if (!$('#f-date-from').val()) $('#f-date-from').val(today);
-  if (!$('#f-date-to').val()) $('#f-date-to').val(today);
+  if (typeof flatpickr === 'function' && $('#f-date-range').length) {
+    flatpickr('#f-date-range', {
+      mode: 'range',
+      dateFormat: 'Y-m-d',
+      locale: { rangeSeparator: ' - ' },
+      defaultDate: [today],
+      allowInput: false,
+      clickOpens: true,
+      onReady: function (_sel, _str, inst) {
+        dashboardDateSelection = [new Date(today)];
+        inst.input.value = today;
+        inst.input.placeholder = today;
+      },
+      onChange: function (selectedDates, _dateStr, inst) {
+        dashboardDateSelection = selectedDates || [];
+        if (dashboardDateSelection.length === 1) {
+          inst.input.value = toIsoLocalDate(dashboardDateSelection[0]);
+        } else if (dashboardDateSelection.length === 0) {
+          dashboardDateSelection = [new Date(today)];
+          inst.input.value = today;
+        }
+      }
+    });
+  } else {
+    dashboardDateSelection = [new Date(today)];
+  }
 
   setDashboardPageLoading(true);
   $('#btn-go-assign-booking').off('click').on('click', openAssignBookingSmoothly);

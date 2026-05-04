@@ -16,9 +16,9 @@
   const toastBodyEl = document.getElementById('asg-feedback-toast-body');
   const feedbackToast = toastEl ? new bootstrap.Toast(toastEl) : null;
   const commitBtnDefaultHtml = commitBtn ? commitBtn.innerHTML : 'Assign All Bookings';
-  const detailPanelEl = document.getElementById('asg-detail-panel');
-  const detailBodyEl = document.getElementById('asg-detail-body');
-  const detailCloseEl = document.getElementById('asg-detail-close');
+  const reviewModalEl = document.getElementById('asgReviewModal');
+  const reviewBodyEl = document.getElementById('asg-review-body');
+  const reviewModal = reviewModalEl ? new bootstrap.Modal(reviewModalEl) : null;
   const hoverPanelEl = document.getElementById('asg-hover-panel');
 
   const state = {
@@ -83,6 +83,107 @@
       .replaceAll('>', '&gt;')
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
+  }
+
+  function fmtMoney(v) {
+    const n = Number(v || 0);
+    if (!Number.isFinite(n)) return '0';
+    return n.toFixed(2).replace(/\.00$/, '');
+  }
+
+
+  function tbsLabel(code) {
+    const c = Number(code || 0);
+    if (c === 1) return 'Test confirmed and booked';
+    if (c === 2) return 'Prescription attached but test not booked';
+    if (c === 3) return 'No test information: ask to patient for tests';
+    if (c === 4) return 'Incompleted test, phlebo verification pending to confirm and book';
+    return '-';
+  }
+
+  function renderReviewModalContent(booking) {
+    if (!reviewBodyEl) return;
+    const patients = Array.isArray(booking?.patients) ? booking.patients : [];
+    const total = Number(booking?.total_amount || 0);
+    const computedSub = patients.reduce((acc, p) => acc + ((Array.isArray(p.tests) ? p.tests : []).reduce((a, t) => a + Number(t.mrp || 0), 0)), 0);
+    const computedDis = patients.reduce((acc, p) => acc + ((Array.isArray(p.tests) ? p.tests : []).reduce((a, t) => a + Number(t.discount || 0), 0)), 0);
+    const sub = Number(booking?.F_Apt_Am ?? computedSub);
+    const dis = Number(booking?.F_dis ?? computedDis);
+    const rows = patients.map((p) => {
+      const tests = Array.isArray(p.tests) ? p.tests : [];
+      const testsRows = tests.map((t) => `
+        <tr>
+          <td><strong>${esc([t.booked_code, t.test_name].filter(Boolean).join(' - ') || '-')}</strong></td>
+          <td class="text-end">${esc(fmtMoney(t.mrp))}</td>
+          <td class="text-end">${esc(fmtMoney(t.discount))}</td>
+          <td class="text-end"><strong>${esc(fmtMoney(t.final_charge))}</strong></td>
+          <td class="text-center">-</td>
+        </tr>
+      `).join('');
+      const patientTotal = tests.reduce((acc, t) => acc + Number(t.final_charge || 0), 0);
+      return `
+      <div class="card mb-2">
+        <div class="card-body">
+          <h6 class="hc-patient-name-red"><span>Patient Name:</span> ${esc(p.full_name || '-')}</h6>
+          <div class="border rounded p-2 mb-2 bg-white">
+            <div class="d-flex flex-wrap gap-3 align-items-center mb-2 hc-review-top-strip">
+              <span class="hc-review-panel-chip">${esc(Array.isArray(p.panel_companies) && p.panel_companies.length ? p.panel_companies.join(', ') : (p.panel_company || '-'))}</span>
+              <span><strong>Test_Bkg_Status:</strong> <span style="color:#0b6b2d;font-weight:700;">${esc(tbsLabel(p.test_booking_status))}</span></span>
+            </div>
+            <div class="mb-1"><strong>Tests (${tests.length}):</strong></div>
+            <div class="table-responsive hc-review-tests-table-wrap">
+              <table class="table table-sm mb-0 hc-review-tests-table">
+                <thead>
+                  <tr>
+                    <th>Test Name</th>
+                    <th class="text-end" style="width:120px;">Standard Charge</th>
+                    <th class="text-end" style="width:100px;">Discount</th>
+                    <th class="text-end" style="width:120px;">Final Charge</th>
+                    <th class="text-center" style="width:80px;">TAT</th>
+                  </tr>
+                </thead>
+                <tbody>${testsRows || '<tr><td colspan="5" class="text-muted">No tests.</td></tr>'}</tbody>
+              </table>
+            </div>
+            <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip">
+              <div class="ms-auto text-end"><strong>Charges: ${esc(fmtMoney(patientTotal))}</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    reviewBodyEl.innerHTML = `
+      <div class="hc-review-grid mb-2">
+        <div class="hc-review-meta">
+          <div><strong>Caller:</strong> ${esc(booking.primary_mobile || '-')} | <strong>Patients:</strong> ${patients.length}</div>
+          <div><strong>Google Location:</strong> <span class="hc-review-linkish">${esc(booking.google_location || '-')}</span></div>
+          <div><strong>Referred By:</strong> ${esc(booking.referred_by || '-')}</div>
+          <div><strong>Internal Referred By:</strong> ${esc(booking.intrnl_rfrncd_by || '-')}</div>
+          <div><strong>Lead ID:</strong> ${esc(booking.lead_id || '-')}</div>
+        </div>
+        <div class="hc-review-address-card">
+          <div class="hc-review-address-title">Address:-</div>
+          <div class="hc-review-address-grid">
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">House/Flat No:</span> <span class="hc-review-addr-v">${esc(booking.house_flat_no || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">Floor:</span> <span class="hc-review-addr-v">${esc(booking.floor || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">Block/Tower No:</span> <span class="hc-review-addr-v">${esc(booking.block_tower_no || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">Street/Sector:</span> <span class="hc-review-addr-v">${esc(booking.street_line || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">Landmark:</span> <span class="hc-review-addr-v">${esc(booking.landmark || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">City:</span> <span class="hc-review-addr-v">${esc(booking.city || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">Colony:</span> <span class="hc-review-addr-v">${esc(booking.colony_name || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">Pincode:</span> <span class="hc-review-addr-v">${esc(booking.pincode || '-')}</span></div>
+            <div class="hc-review-addr-item"><span class="hc-review-addr-k">Route:</span> <span class="hc-review-addr-v">${esc(booking.route_no || '-')}</span></div>
+          </div>
+        </div>
+      </div>
+      ${rows || '<div class="text-muted">No patient details.</div>'}
+      <div id="review-net-amount">
+        <span class="hc-review-total-line"><strong>Final Sub Total:</strong> ${esc(fmtMoney(sub))}</span>
+        <span class="hc-review-total-line"><strong>Final Discount:</strong> ${esc(fmtMoney(dis))}</span>
+        <span class="hc-review-net-chip"><strong>Final Amount:</strong> ${esc(fmtMoney(total))}</span>
+      </div>
+    `;
   }
 
   function tbsLabelFromCodes(csv) {
@@ -180,8 +281,9 @@
               ? Number(b.parent_booking_id || 0)
               : Number(b.booking_id || 0);
             const hoverText = esc(buildHoverText(b));
+            const hasPatientTags = String(b.patient_tags || '').trim().length > 0;
             html += `
-              <div class="asg-booking" draggable="true" data-booking-id="${b.booking_id}" data-detail-booking-id="${detailBookingId}" data-hover-text="${hoverText}">
+              <div class="asg-booking ${hasPatientTags ? 'has-patient-tag' : ''}" draggable="true" data-booking-id="${b.booking_id}" data-detail-booking-id="${detailBookingId}" data-hover-text="${hoverText}">
                 ${extraCount > 0 ? `<div class="asg-extra-pill">+${extraCount}</div>` : ''}
                 <div class="asg-baddr">${place || '-'}</div>
                 <div class="asg-bmob">${callerMobileDisplay}</div>
@@ -240,35 +342,14 @@
       });
       card.addEventListener('dblclick', () => {
         const detailBookingId = Number(card.dataset.detailBookingId || 0);
-        if (!detailBookingId || !detailPanelEl || !detailBodyEl) return;
-        detailPanelEl.classList.remove('d-none');
-        detailBodyEl.innerHTML = '<div class="text-muted">Loading...</div>';
+        if (!detailBookingId || !reviewBodyEl || !reviewModal) return;
+        reviewBodyEl.innerHTML = '<div class="text-muted">Loading...</div>';
+        reviewModal.show();
         $.get(`/hhome-collection/booking/${detailBookingId}`, function (res) {
           const bk = res?.booking || {};
-          const addr = bk || {};
-          const patientTags = Array.from(new Set((bk?.patients || []).map(p => String(p.tag || '').trim()).filter(Boolean)));
-          const bookingTags = String(bk?.booking_tags || '').split(',').map(x => String(x || '').trim()).filter(Boolean);
-          const patientTagHtml = patientTags.length
-            ? patientTags.map(t => `<span class="asg-tag-chip asg-tag-chip-patient">${esc(t)}</span>`).join(' ')
-            : '-';
-          const bookingTagHtml = bookingTags.length
-            ? bookingTags.map(t => `<span class="asg-tag-chip asg-tag-chip-booking">${esc(t)}</span>`).join(' ')
-            : '-';
-          detailBodyEl.innerHTML = `
-            <div><strong>City:</strong> ${esc(addr.city || '-')}</div>
-            <div><strong>Colony Name:</strong> ${esc(addr.colony_name_snapshot || addr.colony_name || '-')}</div>
-            <div><strong>Pin Code:</strong> ${esc(addr.pincode || '-')}</div>
-            <div class="asg-tag-row mt-1">
-              <span class="asg-tag-row-label">Patient Tag:</span>
-              <span>${patientTagHtml}</span>
-            </div>
-            <div class="asg-tag-row">
-              <span class="asg-tag-row-label">Booking Tag:</span>
-              <span>${bookingTagHtml}</span>
-            </div>
-          `;
+          renderReviewModalContent(bk);
         }).fail(function (xhr) {
-          detailBodyEl.innerHTML = `<div class="text-danger">${esc(xhr?.responseJSON?.message || 'Unable to load details')}</div>`;
+          reviewBodyEl.innerHTML = `<div class="text-danger">${esc(xhr?.responseJSON?.message || 'Unable to load details')}</div>`;
         });
       });
     });
@@ -491,9 +572,6 @@
     bindBottomScrollerSync();
     if (reloadBtn) reloadBtn.addEventListener('click', loadPlanner);
     if (commitBtn) commitBtn.addEventListener('click', commitAssignments);
-    if (detailCloseEl && detailPanelEl) {
-      detailCloseEl.addEventListener('click', () => detailPanelEl.classList.add('d-none'));
-    }
     loadPlanner();
   }
 

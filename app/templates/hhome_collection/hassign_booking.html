@@ -27,12 +27,21 @@
   <button class="btn btn-success" id="asg-commit-btn">Assign All Bookings</button>
 </div>
 
-<div id="asg-detail-panel" class="asg-detail-panel d-none">
-  <div class="asg-detail-head"><span>Booking Detail</span><button id="asg-detail-close" type="button" class="asg-detail-close" aria-label="Close">&times;</button></div>
-  <div id="asg-detail-body" class="asg-detail-body"></div>
-</div>
-
 <pre id="asg-hover-panel" class="asg-hover-panel d-none"></pre>
+
+<div class="modal fade" id="asgReviewModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable" style="max-width:1020px;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Booking Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="asg-review-body"></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="position-fixed top-50 start-50 translate-middle asg-toast-wrap">
   <div id="asg-feedback-toast" class="toast align-items-center border-0" role="alert" aria-live="assertive" aria-atomic="true" data-bs-autohide="false">

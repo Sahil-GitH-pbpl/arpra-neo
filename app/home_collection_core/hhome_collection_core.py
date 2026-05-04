@@ -450,11 +450,15 @@ class HHomeCollectionCore:
         )
         return bool(cur.fetchone())
 
-    def _compute_booking_total_amount(self, tests_meta_map) -> float:
+    def _compute_booking_amount_breakup(self, tests_meta_map, additional_discount_amount: float = 0.0) -> tuple[float, float, float]:
+        subtotal = 0.0
+        discount_total = 0.0
+        max_allowed_total_discount = 0.0
         total = 0.0
         meta_map = tests_meta_map or {}
         for patient_meta in meta_map.values():
             for section in self._patient_panel_sections(patient_meta):
+                comp_cat_id = ((section.get("billing") or {}).get("comp_cat_id"))
                 for t in (section.get("selected_tests") or []):
                     try:
                         mrp = float(t.get("mrp") or 0)
@@ -464,11 +468,112 @@ class HHomeCollectionCore:
                         max_discount = float(t.get("max_discount") or 0)
                     except Exception:
                         max_discount = 0.0
+                    try:
+                        max_allowed_discount = float(t.get("max_allowed_discount") or 0)
+                    except Exception:
+                        max_allowed_discount = 0.0
+                    if max_allowed_discount <= 0:
+                        max_allowed_discount = self._max_allowed_discount_from_panelrates(
+                            comp_cat_id,
+                            t.get("booked_code"),
+                            mrp,
+                        )
+                    subtotal += mrp
+                    discount_total += max_discount
+                    max_allowed_total_discount += max_allowed_discount
                     final_charge = mrp - max_discount
                     if final_charge < 0:
                         final_charge = 0.0
                     total += final_charge
-        return round(total, 2)
+        try:
+            addl_discount = float(additional_discount_amount or 0)
+        except Exception:
+            addl_discount = 0.0
+        if addl_discount < 0:
+            addl_discount = 0.0
+        total_discount = discount_total + addl_discount
+        if max_allowed_total_discount > 0 and total_discount > max_allowed_total_discount:
+            total_discount = max_allowed_total_discount
+        total = subtotal - total_discount
+        if total < 0:
+            total = 0.0
+        return round(subtotal, 2), round(total_discount, 2), round(total, 2)
+
+    def _compute_booking_total_amount(self, tests_meta_map) -> float:
+        _subtotal, _discount, total = self._compute_booking_amount_breakup(tests_meta_map)
+        return total
+
+    def _max_allowed_discount_from_panelrates(self, comp_cat_id, booked_code, mrp_value: float) -> float:
+        comp = self._norm_code(comp_cat_id)
+        code = self._norm_code(booked_code)
+        if not comp or not code:
+            return 0.0
+        try:
+            mrp_num = float(mrp_value or 0)
+        except Exception:
+            mrp_num = 0.0
+        if mrp_num <= 0:
+            return 0.0
+
+        conn = get_bhasin7001_connection()
+        try:
+            with conn.cursor() as cur:
+                gcode = ""
+                scode = ""
+                test_code = ""
+                m_full = re.match(r"^(G\d{2})?(S\d{2})?(T\d+)$", code, flags=re.IGNORECASE)
+                if m_full:
+                    gcode = (m_full.group(1) or "").upper()
+                    scode = (m_full.group(2) or "").upper()
+                    test_code = (m_full.group(3) or "").upper()
+                if not test_code:
+                    m_tail = re.search(r"(T\d+)$", code, flags=re.IGNORECASE)
+                    if m_tail:
+                        test_code = m_tail.group(1).upper()
+
+                pct = 0.0
+                if not (gcode and scode and test_code):
+                    return 0.0
+
+                cur.execute(
+                    """
+                    SELECT MaximumpercentageAllowed
+                    FROM panelrates
+                    WHERE CompCatID=%s
+                      AND BookedFlag=1
+                      AND GCode=%s
+                      AND SCode=%s
+                      AND TestCode=%s
+                      AND ABS(COALESCE(MRP,0) - %s) < 0.0001
+                    LIMIT 1
+                    """,
+                    (comp, gcode, scode, test_code, mrp_num),
+                )
+                exact_row = cur.fetchone() or {}
+                pct = float(exact_row.get("MaximumpercentageAllowed") or 0)
+
+                if pct <= 0:
+                    cur.execute(
+                        """
+                        SELECT MAX(MaximumpercentageAllowed) AS MaximumpercentageAllowed
+                        FROM panelrates
+                        WHERE CompCatID=%s
+                          AND BookedFlag=1
+                          AND GCode=%s
+                          AND SCode=%s
+                          AND TestCode=%s
+                        """,
+                        (comp, gcode, scode, test_code),
+                    )
+                    scoped_row = cur.fetchone() or {}
+                    pct = float(scoped_row.get("MaximumpercentageAllowed") or 0)
+                if pct <= 0:
+                    return 0.0
+                return round((mrp_num * pct) / 100.0, 2)
+        except Exception:
+            return 0.0
+        finally:
+            conn.close()
 
     def _recalculate_followup_required(self, cur, booking_id: int):
         cur.execute(
@@ -681,7 +786,7 @@ class HHomeCollectionCore:
                         """
                         SELECT
                             CompCatID, GCode, SCode, TestCode, CTestCode, CTestName,
-                            Charge, MRP, MaxDiscount
+                            MRP, PercentageOnStandard, MaximumpercentageAllowed
                         FROM panelrates
                         WHERE BookedFlag = 1
                         """
@@ -740,6 +845,21 @@ class HHomeCollectionCore:
                 s = self._norm_code(r.get("SCode"))
                 if not cc or not g:
                     continue
+                try:
+                    mrp_value = float(r.get("MRP") or 0)
+                except Exception:
+                    mrp_value = 0.0
+                try:
+                    pct_on_standard = float(r.get("PercentageOnStandard") or 0)
+                except Exception:
+                    pct_on_standard = 0.0
+                try:
+                    max_pct_allowed = float(r.get("MaximumpercentageAllowed") or 0)
+                except Exception:
+                    max_pct_allowed = 0.0
+                calc_discount = round((mrp_value * pct_on_standard) / 100.0, 2) if mrp_value > 0 else 0.0
+                max_allowed_discount = round((mrp_value * max_pct_allowed) / 100.0, 2) if mrp_value > 0 else 0.0
+                calc_final_charge = round(max(0.0, mrp_value - calc_discount), 2)
 
                 gname = group_name.get(g, "")
                 groups_by_comp.setdefault(cc, {})
@@ -783,9 +903,10 @@ class HHomeCollectionCore:
                     "description_lc": description.lower(),
                     "group_description": group_desc,
                     "subgroup_description": subgroup_desc,
-                    "charge": r.get("Charge"),
-                    "mrp": r.get("MRP"),
-                    "max_discount": r.get("MaxDiscount"),
+                    "charge": calc_final_charge,
+                    "mrp": mrp_value,
+                    "max_discount": calc_discount,
+                    "max_allowed_discount": max_allowed_discount,
                     "is_profile": bool((meta or {}).get("is_profile")),
                     "has_children": has_children,
                 }
@@ -799,9 +920,10 @@ class HHomeCollectionCore:
                         "testcode1": testcode1,
                         "booked_code": booked_code,
                         "description": description,
-                        "charge": r.get("Charge"),
-                        "mrp": r.get("MRP"),
-                        "max_discount": r.get("MaxDiscount"),
+                        "charge": calc_final_charge,
+                        "mrp": mrp_value,
+                        "max_discount": calc_discount,
+                        "max_allowed_discount": max_allowed_discount,
                         "is_profile": bool((meta or {}).get("is_profile")),
                     }
                 )
@@ -2511,7 +2633,10 @@ class HHomeCollectionCore:
         tests_meta_map = payload.get("patient_tests_meta_map") or {}
         permanent_tags = self.sanitize_permanent_tags(payload.get("permanent_tags"))
         booking_tags = self.sanitize_transactional_tags(payload.get("booking_tags"))
-        total_amount = self._compute_booking_total_amount(tests_meta_map)
+        final_sub_total, final_discount, total_amount = self._compute_booking_amount_breakup(
+            tests_meta_map,
+            payload.get("additional_discount_amount"),
+        )
 
         def _to_num(v):
             try:
@@ -2531,8 +2656,8 @@ class HHomeCollectionCore:
                     (booking_code, caller_id, selected_address_id, address_snapshot_json,
                      preferred_visit_date, preferred_time_slot, booking_status,
                      strt_time, cmplt_time, referred_by, intrnl_rfrncd_by, lead_id, remarks, assigned_phlebotomist_id,
-                     booking_tags, total_amount, created_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,0,NULL,NULL,%s,%s,%s,%s,NULL,%s,%s,%s)
+                     booking_tags, F_Apt_Am, F_dis, total_amount, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,0,NULL,NULL,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s)
                     """,
                     (
                         tmp,
@@ -2546,6 +2671,8 @@ class HHomeCollectionCore:
                         payload.get("lead_id") or None,
                         payload.get("remarks") or None,
                         booking_tags or None,
+                        final_sub_total,
+                        final_discount,
                         total_amount,
                         actor,
                     ),
@@ -2716,6 +2843,7 @@ class HHomeCollectionCore:
                     hcb.booking_code LIKE %s
                     OR cm.primary_mobile LIKE %s
                     OR cm.full_name LIKE %s
+                    OR TRIM(COALESCE(u.name, '')) LIKE %s
                     OR EXISTS (
                       SELECT 1
                       FROM hhome_collection_booking_patient hbp2
@@ -2725,7 +2853,7 @@ class HHomeCollectionCore:
                     )
                 )"""
             )
-            values.extend([f"%{params['search']}%"] * 4)
+            values.extend([f"%{params['search']}%"] * 5)
 
         where_clause = "WHERE " + " AND ".join(filters) if filters else ""
         where_clause_appt = where_clause
@@ -2871,7 +2999,7 @@ class HHomeCollectionCore:
 
                 cur.execute(
                     """
-                    SELECT patient_id, booked_code, test_name
+                    SELECT patient_id, panel_company, selected_charge_mode, booked_code, test_name, charge, mrp, max_discount
                     FROM hhome_collection_booking_patient_test
                     WHERE booking_id=%s
                     ORDER BY id
@@ -2880,6 +3008,7 @@ class HHomeCollectionCore:
                 )
                 test_rows = cur.fetchall()
                 tests_by_patient = {}
+                test_detail_by_patient = {}
                 for row in test_rows:
                     pid = int(row.get("patient_id") or 0)
                     if pid <= 0:
@@ -2890,6 +3019,22 @@ class HHomeCollectionCore:
                     tests_by_patient.setdefault(pid, [])
                     if label not in tests_by_patient[pid]:
                         tests_by_patient[pid].append(label)
+                    mrp = float(row.get("mrp") or 0)
+                    discount = float(row.get("max_discount") or 0)
+                    final_charge = mrp - discount
+                    if final_charge < 0:
+                        final_charge = 0
+                    test_detail_by_patient.setdefault(pid, []).append(
+                        {
+                            "booked_code": self._norm_code(row.get("booked_code")),
+                            "test_name": self._norm_code(row.get("test_name")),
+                            "panel_company": self._norm_code(row.get("panel_company")),
+                            "selected_charge_mode": self._norm_code(row.get("selected_charge_mode")),
+                            "mrp": mrp,
+                            "discount": discount,
+                            "final_charge": round(final_charge, 2),
+                        }
+                    )
                 cur.execute(
                     """
                     SELECT patient_id, panel_company
@@ -2918,6 +3063,7 @@ class HHomeCollectionCore:
                 for p in patients:
                     pid = int(p.get("patient_id") or 0)
                     p["tests_display"] = ", ".join(tests_by_patient.get(pid, [])) if pid else ""
+                    p["tests"] = test_detail_by_patient.get(pid, []) if pid else []
                     p["patient_documents"] = self._split_patient_documents(p.get("patient_documents"))
                     p["prescription_files"] = self._split_prescription_files(p.get("prescription_files"))
                     p["panel_company"] = self._norm_code(p.get("panel_company"))
@@ -3443,13 +3589,20 @@ class HHomeCollectionCore:
                     panel_section = tb["panels"][panel_idx]
                     booked_code = self._norm_code(row.get("booked_code"))
                     if booked_code:
+                        mrp_val = float(row.get("mrp") or 0)
+                        max_allowed_discount = self._max_allowed_discount_from_panelrates(
+                            row.get("comp_cat_id"),
+                            booked_code,
+                            mrp_val,
+                        )
                         panel_section["selected_tests"].append(
                             {
                                 "booked_code": booked_code,
                                 "description": self._norm_code(row.get("test_name")),
                                 "charge": float(row.get("charge") or 0),
-                                "mrp": float(row.get("mrp") or 0),
+                                "mrp": mrp_val,
                                 "max_discount": float(row.get("max_discount") or 0),
+                                "max_allowed_discount": max_allowed_discount,
                             }
                         )
 
@@ -3462,6 +3615,20 @@ class HHomeCollectionCore:
                     tb["selected_tests"] = first.get("selected_tests") or []
         finally:
             conn.close()
+
+        base_discount_total = 0.0
+        for tb in tests_billing_map.values():
+            for section in (tb.get("panels") or []):
+                for t in (section.get("selected_tests") or []):
+                    try:
+                        base_discount_total += float(t.get("max_discount") or 0)
+                    except Exception:
+                        pass
+        try:
+            booking_total_discount = float(booking.get("F_dis") or 0)
+        except Exception:
+            booking_total_discount = 0.0
+        additional_discount_amount = round(max(0.0, booking_total_discount - base_discount_total), 2)
 
         address_snapshot = self.get_address_snapshot(address_id)
         session["hcaller_id"] = caller_id
@@ -3481,6 +3648,9 @@ class HHomeCollectionCore:
                 "lead_id": self._norm_code(booking.get("lead_id")),
                 "remarks": self._norm_code(booking.get("remarks")),
                 "booking_tags": self._norm_code(booking.get("booking_tags")),
+                "additional_discount_mode": "amount" if additional_discount_amount > 0 else "",
+                "additional_discount_value": additional_discount_amount if additional_discount_amount > 0 else 0,
+                "additional_discount_amount": additional_discount_amount,
             },
             "tests_billing_map": tests_billing_map,
             "searched_mobile": self._norm_code(booking.get("primary_mobile")),
@@ -3579,13 +3749,20 @@ class HHomeCollectionCore:
                         )
                     booked_code = self._norm_code(row.get("booked_code"))
                     if booked_code:
+                        mrp_val = float(row.get("mrp") or 0)
+                        max_allowed_discount = self._max_allowed_discount_from_panelrates(
+                            row.get("comp_cat_id"),
+                            booked_code,
+                            mrp_val,
+                        )
                         tb["panels"][panel_idx]["selected_tests"].append(
                             {
                                 "booked_code": booked_code,
                                 "description": self._norm_code(row.get("test_name")),
                                 "charge": float(row.get("charge") or 0),
-                                "mrp": float(row.get("mrp") or 0),
+                                "mrp": mrp_val,
                                 "max_discount": float(row.get("max_discount") or 0),
+                                "max_allowed_discount": max_allowed_discount,
                             }
                         )
 
@@ -3632,6 +3809,20 @@ class HHomeCollectionCore:
         finally:
             conn.close()
 
+        base_discount_total = 0.0
+        for tb in tests_billing_map.values():
+            for section in (tb.get("panels") or []):
+                for t in (section.get("selected_tests") or []):
+                    try:
+                        base_discount_total += float(t.get("max_discount") or 0)
+                    except Exception:
+                        pass
+        try:
+            booking_total_discount = float(booking.get("F_dis") or 0)
+        except Exception:
+            booking_total_discount = 0.0
+        additional_discount_amount = round(max(0.0, booking_total_discount - base_discount_total), 2)
+
         address_snapshot = self.get_address_snapshot(address_id)
         session["hcaller_id"] = caller_id
         session["hselected_patients"] = selected_patients
@@ -3650,6 +3841,9 @@ class HHomeCollectionCore:
                 "lead_id": self._norm_code(booking.get("lead_id")),
                 "remarks": self._norm_code(booking.get("remarks")),
                 "booking_tags": self._norm_code(booking.get("booking_tags")),
+                "additional_discount_mode": "amount" if additional_discount_amount > 0 else "",
+                "additional_discount_value": additional_discount_amount if additional_discount_amount > 0 else 0,
+                "additional_discount_amount": additional_discount_amount,
             },
             "tests_billing_map": tests_billing_map,
             "searched_mobile": self._norm_code(booking.get("primary_mobile")),
@@ -3686,6 +3880,7 @@ class HHomeCollectionCore:
                         hcb.intrnl_rfrncd_by,
                         hcb.lead_id,
                         hcb.booking_tags,
+                        hcb.F_dis,
                         hcb.selected_address_id AS booking_address_id,
                         cm.primary_mobile
                     FROM hhome_collection_booking_appointment ap
@@ -3833,13 +4028,20 @@ class HHomeCollectionCore:
                             )
                         booked_code = self._norm_code(row.get("booked_code"))
                         if booked_code:
+                            mrp_val = float(row.get("mrp") or 0)
+                            max_allowed_discount = self._max_allowed_discount_from_panelrates(
+                                row.get("comp_cat_id"),
+                                booked_code,
+                                mrp_val,
+                            )
                             tb["panels"][panel_idx]["selected_tests"].append(
                                 {
                                     "booked_code": booked_code,
                                     "description": self._norm_code(row.get("test_name")),
                                     "charge": float(row.get("charge") or 0),
-                                    "mrp": float(row.get("mrp") or 0),
+                                    "mrp": mrp_val,
                                     "max_discount": float(row.get("max_discount") or 0),
+                                    "max_allowed_discount": max_allowed_discount,
                                 }
                             )
 
@@ -3872,6 +4074,20 @@ class HHomeCollectionCore:
         finally:
             conn.close()
 
+        base_discount_total = 0.0
+        for tb in tests_billing_map.values():
+            for section in (tb.get("panels") or []):
+                for t in (section.get("selected_tests") or []):
+                    try:
+                        base_discount_total += float(t.get("max_discount") or 0)
+                    except Exception:
+                        pass
+        try:
+            booking_total_discount = float(ap.get("F_dis") or 0)
+        except Exception:
+            booking_total_discount = 0.0
+        additional_discount_amount = round(max(0.0, booking_total_discount - base_discount_total), 2)
+
         session["hcaller_id"] = caller_id
         session["hselected_patients"] = selected_patients
         session["hselected_address_id"] = address_id
@@ -3890,6 +4106,9 @@ class HHomeCollectionCore:
                 "lead_id": self._norm_code(ap.get("lead_id")),
                 "remarks": self._norm_code(ap.get("remarks")),
                 "booking_tags": self._norm_code(ap.get("booking_tags")),
+                "additional_discount_mode": "amount" if additional_discount_amount > 0 else "",
+                "additional_discount_value": additional_discount_amount if additional_discount_amount > 0 else 0,
+                "additional_discount_amount": additional_discount_amount,
             },
             "tests_billing_map": tests_billing_map,
             "searched_mobile": self._norm_code(ap.get("primary_mobile")),
@@ -3925,7 +4144,10 @@ class HHomeCollectionCore:
             return {"ok": False, "message": "Visit date cannot be in past"}
 
         tests_meta_map = payload.get("patient_tests_meta_map") or {}
-        total_amount = self._compute_booking_total_amount(tests_meta_map)
+        final_sub_total, final_discount, total_amount = self._compute_booking_amount_breakup(
+            tests_meta_map,
+            payload.get("additional_discount_amount"),
+        )
         reason_text = self._norm_code(payload.get("modify_reason_text") or payload.get("reason_text"))
 
         def _to_num(v):
@@ -4128,8 +4350,8 @@ class HHomeCollectionCore:
 
                 self._recalculate_followup_required(cur, booking_id)
                 cur.execute(
-                    "UPDATE hhome_collection_booking SET total_amount=%s WHERE id=%s",
-                    (total_amount, booking_id),
+                    "UPDATE hhome_collection_booking SET F_Apt_Am=%s, F_dis=%s, total_amount=%s WHERE id=%s",
+                    (final_sub_total, final_discount, total_amount, booking_id),
                 )
                 conn.commit()
                 return {"ok": True, "booking_id": booking_id, "appointment_id": appointment_id}
@@ -4158,7 +4380,10 @@ class HHomeCollectionCore:
             return {"ok": False, "message": "Visit date cannot be in past"}
 
         tests_meta_map = payload.get("patient_tests_meta_map") or {}
-        total_amount = self._compute_booking_total_amount(tests_meta_map)
+        final_sub_total, final_discount, total_amount = self._compute_booking_amount_breakup(
+            tests_meta_map,
+            payload.get("additional_discount_amount"),
+        )
         reason_text = self._norm_code(payload.get("followup_reason_text") or payload.get("reason_text"))
 
         def _to_num(v):
@@ -4357,8 +4582,8 @@ class HHomeCollectionCore:
                 pending_count = self._recalculate_followup_required(cur, booking_id)
                 appt_status = 0
                 cur.execute(
-                    "UPDATE hhome_collection_booking SET total_amount=%s WHERE id=%s",
-                    (total_amount, booking_id),
+                    "UPDATE hhome_collection_booking SET F_Apt_Am=%s, F_dis=%s, total_amount=%s WHERE id=%s",
+                    (final_sub_total, final_discount, total_amount, booking_id),
                 )
                 cur.execute(
                     "UPDATE hhome_collection_booking_appointment SET appointment_status=%s, updated_by=%s WHERE id=%s",
@@ -4401,7 +4626,10 @@ class HHomeCollectionCore:
         tests_meta_map = payload.get("patient_tests_meta_map") or {}
         permanent_tags = self.sanitize_permanent_tags(payload.get("permanent_tags"))
         booking_tags = self.sanitize_transactional_tags(payload.get("booking_tags"))
-        total_amount = self._compute_booking_total_amount(tests_meta_map)
+        final_sub_total, final_discount, total_amount = self._compute_booking_amount_breakup(
+            tests_meta_map,
+            payload.get("additional_discount_amount"),
+        )
         modify_reason = (payload.get("modify_reason_text") or "").strip()
         if not modify_reason:
             return {"ok": False, "message": "Modify reason is required"}
@@ -4476,6 +4704,8 @@ class HHomeCollectionCore:
                             lead_id=%s,
                             remarks=%s,
                             booking_tags=%s,
+                            F_Apt_Am=%s,
+                            F_dis=%s,
                             total_amount=%s,
                             assigned_phlebotomist_id=%s
                         WHERE id=%s
@@ -4492,6 +4722,8 @@ class HHomeCollectionCore:
                             payload.get("lead_id") or None,
                             payload.get("remarks") or None,
                             booking_tags or None,
+                            final_sub_total,
+                            final_discount,
                             total_amount,
                             next_assigned_user_id,
                             booking_id,
@@ -4499,8 +4731,8 @@ class HHomeCollectionCore:
                     )
                 else:
                     cur.execute(
-                        "UPDATE hhome_collection_booking SET total_amount=%s WHERE id=%s",
-                        (total_amount, booking_id),
+                        "UPDATE hhome_collection_booking SET F_Apt_Am=%s, F_dis=%s, total_amount=%s WHERE id=%s",
+                        (final_sub_total, final_discount, total_amount, booking_id),
                     )
 
                 cur.execute("SELECT patient_id FROM hhome_collection_booking_patient WHERE booking_id=%s", (booking_id,))
@@ -5208,8 +5440,3 @@ class HHomeCollectionCore:
             return {"ok": False, "message": str(exc)}
         finally:
             conn.close()
-
-
-
-
-

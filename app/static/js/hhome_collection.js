@@ -1698,6 +1698,27 @@ function formatCharge(v) {
   return n.toFixed(2).replace(/\.00$/, '');
 }
 
+function getAdditionalDiscountState() {
+  const ap = wizardData.appointment || {};
+  const mode = String(ap.additional_discount_mode || '').toLowerCase();
+  const value = Number(ap.additional_discount_value || 0);
+  const amount = Number(ap.additional_discount_amount || 0);
+  return {
+    mode: (mode === 'amount' || mode === 'percent') ? mode : '',
+    value: Number.isFinite(value) && value > 0 ? value : 0,
+    amount: Number.isFinite(amount) && amount > 0 ? amount : 0
+  };
+}
+
+function computeAdditionalDiscountAmount(mode, value, subtotal) {
+  const cleanValue = Number(value || 0);
+  const cleanSubtotal = Number(subtotal || 0);
+  if (!Number.isFinite(cleanValue) || cleanValue <= 0) return 0;
+  if (mode === 'amount') return cleanValue;
+  if (mode === 'percent') return (cleanSubtotal * cleanValue) / 100;
+  return 0;
+}
+
 function renderReviewTestsHtml(selectedTests, catalog) {
   const list = Array.isArray(selectedTests) ? selectedTests : [];
   if (!list.length) {
@@ -2347,6 +2368,9 @@ function renderPanelTestsList(tests, emptyMessage) {
   const modalSelected = activePanelPicker.tempSelected || {};
   const selectedOwners = activePanelPicker.selectedOwners || {};
   const html = list.map(t => {
+    const mrp = Number(t?.mrp || 0);
+    const discount = Number(t?.max_discount || 0);
+    const finalCharge = Math.max(0, mrp - discount);
     const key = testSelKey(t);
     const owner = selectedOwners[key];
     const disabledByOtherPanel = owner && !owner.isCurrent;
@@ -2376,6 +2400,7 @@ function renderPanelTestsList(tests, emptyMessage) {
           data-charge="${escHtml(t.charge || '')}"
           data-mrp="${escHtml(t.mrp || '')}"
           data-max-discount="${escHtml(t.max_discount || '')}"
+          data-max-allowed-discount="${escHtml(t.max_allowed_discount || '')}"
         />
           <div class="panel-test-main">
             <div><strong>${escHtml(t.description || '')}</strong></div>
@@ -2383,7 +2408,7 @@ function renderPanelTestsList(tests, emptyMessage) {
               <span>${escHtml(t.booked_code || '')}</span>
               ${groupLine ? `| <span>${escHtml(groupLine)}</span>` : ''}
             </div>
-            <div class="panel-test-meta">Charge: ${escHtml(t.charge || 0)} | MRP: ${escHtml(t.mrp || 0)} | MaxDisc: ${escHtml(t.max_discount || 0)}</div>
+            <div class="panel-test-meta">MRP: ${escHtml(formatCharge(mrp))} | Discount: ${escHtml(formatCharge(discount))} | Charge: ${escHtml(formatCharge(finalCharge))}</div>
             ${alreadyLine}
           </div>
           ${childBtn ? `<div class="panel-test-actions">${childBtn}</div>` : ''}
@@ -2403,7 +2428,8 @@ function renderPanelTestsList(tests, emptyMessage) {
       description: String($(this).data('description') || ''),
       charge: Number($(this).data('charge') || 0),
       mrp: Number($(this).data('mrp') || 0),
-      max_discount: Number($(this).data('max-discount') || 0)
+      max_discount: Number($(this).data('max-discount') || 0),
+      max_allowed_discount: Number($(this).data('max-allowed-discount') || 0)
     };
     const key = testSelKey(pick);
     activePanelPicker.tempSelected = activePanelPicker.tempSelected || {};
@@ -2686,7 +2712,8 @@ function applySelectedPanelTests() {
     description: String(t.description || '').trim(),
     charge: Number(t.charge || 0),
     mrp: Number(t.mrp || 0),
-    max_discount: Number(t.max_discount || 0)
+    max_discount: Number(t.max_discount || 0),
+    max_allowed_discount: Number(t.max_allowed_discount || 0)
   })).filter((t) => !!t.booked_code);
   syncPrimaryPanelFields(tb);
   renderSelectedTestsForPanel(pid, idx);
@@ -2897,6 +2924,7 @@ function renderReview() {
 
       let subTotalAmount = 0;
       let discountAmount = 0;
+      let maxAllowedDiscountAmount = 0;
       const rows = patients.map(p => {
         const pid = String(p.patient_id);
         const tb = ensureTbObject(pid);
@@ -2910,9 +2938,11 @@ function renderReview() {
           const testCount = selectedTests.length;
           const testsSummary = renderReviewTestsHtml(selectedTests, catalog);
           const chargeMode = chargeModeLabel(billing.selected_charge_mode || billing.charge_mode_code || '');
+          const panelMaxAllowed = selectedTests.reduce((acc, t) => acc + Number(t?.max_allowed_discount || 0), 0);
           patientTotal += Number(testsSummary.total || 0);
           subTotalAmount += Number(testsSummary.subtotal || 0);
           discountAmount += Number(testsSummary.discountTotal || 0);
+          maxAllowedDiscountAmount += Number(panelMaxAllowed || 0);
           (testsSummary.tubes || []).forEach((tube) => {
             const k = String(tube || '').trim().toLowerCase();
             if (k) patientTubeSet.add(tube);
@@ -2948,12 +2978,74 @@ function renderReview() {
       }).join('');
 
       $('#review-patient-sections').html(rows || '<div class="text-muted">No patient data.</div>');
-      const computedNet = Math.max(0, Number(subTotalAmount || 0) - Number(discountAmount || 0));
+      const addlState = getAdditionalDiscountState();
+      const baseDiscount = Number(discountAmount || 0);
+      const subTotal = Number(subTotalAmount || 0);
+      const maxAllowed = Number(maxAllowedDiscountAmount || 0);
+      const addlAmountRaw = computeAdditionalDiscountAmount(addlState.mode, addlState.value, subTotal);
+      const totalDiscountRaw = baseDiscount + Number(addlAmountRaw || 0);
+      const cappedTotalDiscount = (maxAllowed > 0) ? Math.min(totalDiscountRaw, maxAllowed) : totalDiscountRaw;
+      const effectiveAdditional = Math.max(0, cappedTotalDiscount - baseDiscount);
+      wizardData.appointment = wizardData.appointment || {};
+      wizardData.appointment.additional_discount_amount = effectiveAdditional;
+      const computedNet = Math.max(0, subTotal - Number(cappedTotalDiscount || 0));
       $('#review-net-amount').html(`
-        <span class="hc-review-total-line"><strong>Final Sub Total:</strong> ${escHtml(formatCharge(subTotalAmount))}</span>
-        <span class="hc-review-total-line"><strong>Final Discount:</strong> ${escHtml(formatCharge(discountAmount))}</span>
-        <span class="hc-review-net-chip"><strong>Final Amount:</strong> ${escHtml(formatCharge(computedNet))}</span>
+        <div class="hc-review-total-line"><strong>Sub Total:</strong> <span id="rv-subtotal-v">${escHtml(formatCharge(subTotal))}</span></div>
+        <div class="hc-review-total-line"><strong>Base Discount:</strong> <span id="rv-base-discount-v">${escHtml(formatCharge(baseDiscount))}</span></div>
+        <div class="hc-review-total-line"><strong>Additional:</strong> <span id="rv-additional-v">${escHtml(formatCharge(effectiveAdditional))}</span></div>
+        <div class="hc-review-total-line"><strong>Final Discount:</strong> <span id="rv-final-discount-v">${escHtml(formatCharge(cappedTotalDiscount))}</span></div>
       `);
+      $('#review-final-amount-wrap').html(`
+        <span class="hc-review-net-chip"><strong>Final Amount:</strong> <span id="rv-final-amount-v">${escHtml(formatCharge(computedNet))}</span></span>
+      `);
+      $('#review-additional-wrap').html(`
+        <div class="hc-addl-discount-row">
+          <button type="button" id="btn-additional-discount" class="btn btn-sm hc-additional-btn">+ Additional Discount</button>
+          <div id="additional-discount-controls" class="hc-addl-discount-controls d-none">
+            <label class="me-2"><input type="radio" name="additional-discount-type" value="amount"> Amount</label>
+            <label class="me-2"><input type="radio" name="additional-discount-type" value="percent"> Percent</label>
+            <input type="number" min="0" step="0.01" id="additional-discount-value" class="form-control form-control-sm d-none" placeholder="Enter value">
+            <button type="button" id="btn-apply-additional-discount" class="btn btn-primary btn-sm d-none">Apply</button>
+          </div>
+        </div>
+      `);
+      $('#btn-additional-discount').off('click').on('click', function () {
+        $('#additional-discount-controls').toggleClass('d-none');
+      });
+      if (addlState.mode) {
+        $(`input[name=\"additional-discount-type\"][value=\"${addlState.mode}\"]`).prop('checked', true);
+        $('#additional-discount-value').removeClass('d-none').val(addlState.value > 0 ? addlState.value : '');
+        $('#btn-apply-additional-discount').removeClass('d-none');
+      }
+      $('input[name="additional-discount-type"]').off('change').on('change', function () {
+        const mode = String($(this).val() || '');
+        wizardData.appointment.additional_discount_mode = mode;
+        $('#additional-discount-value').removeClass('d-none');
+        $('#btn-apply-additional-discount').removeClass('d-none');
+      });
+      $('#btn-apply-additional-discount').off('click').on('click', function () {
+        const mode = String(($('input[name="additional-discount-type"]:checked').val() || '')).toLowerCase();
+        const value = Number($('#additional-discount-value').val() || 0);
+        if (!mode) {
+          alert('Please select Amount or Percent first.');
+          return;
+        }
+        wizardData.appointment.additional_discount_mode = mode;
+        wizardData.appointment.additional_discount_value = Number.isFinite(value) && value > 0 ? value : 0;
+        const addlAmount = computeAdditionalDiscountAmount(mode, wizardData.appointment.additional_discount_value, subTotal);
+        const totalDiscount = baseDiscount + Number(addlAmount || 0);
+        if (maxAllowed > 0 && totalDiscount > maxAllowed) {
+          const maxExtraAllowed = Math.max(0, maxAllowed - baseDiscount);
+          alert(`Maximum allowed discount for this booking is ${formatCharge(maxAllowed)}. You can apply additional discount up to ${formatCharge(maxExtraAllowed)}.`);
+          return;
+        }
+        const finalDiscount = totalDiscount;
+        const finalAmount = Math.max(0, subTotal - finalDiscount);
+        wizardData.appointment.additional_discount_amount = Number(addlAmount || 0);
+        $('#rv-additional-v').text(formatCharge(addlAmount));
+        $('#rv-final-discount-v').text(formatCharge(finalDiscount));
+        $('#rv-final-amount-v').text(formatCharge(finalAmount));
+      });
     });
   });
 }
@@ -2998,6 +3090,9 @@ function confirmBooking() {
       remarks: wizardData.appointment.remarks || '',
       permanent_tags: wizardData.appointment.permanent_tags || '',
       booking_tags: wizardData.appointment.booking_tags || '',
+      additional_discount_mode: wizardData.appointment.additional_discount_mode || '',
+      additional_discount_value: Number(wizardData.appointment.additional_discount_value || 0),
+      additional_discount_amount: Number(wizardData.appointment.additional_discount_amount || 0),
       patient_tests_meta_map: testsMetaMap
     };
 
