@@ -96,12 +96,149 @@ function generateRescheduleSlots() {
 }
 
 function tbsLabel(code) {
+  const normalized = String(code ?? '').trim();
+  if (!normalized) return '-';
+  if (
+    normalized === 'Test confirmed and booked' ||
+    normalized === 'Prescription attached but test not booked' ||
+    normalized === 'No test information: ask to patient for tests' ||
+    normalized === 'Incompleted test, phlebo verification pending to confirm and book'
+  ) return normalized;
   const c = Number(code || 0);
   if (c === 1) return 'Test confirmed and booked';
   if (c === 2) return 'Prescription attached but test not booked';
-  if (c === 3) return 'Need to check and confirm';
-  if (c === 4) return 'No test booked';
+  if (c === 3) return 'No test information: ask to patient for tests';
+  if (c === 4) return 'Incompleted test, phlebo verification pending to confirm and book';
   return '-';
+}
+
+function esc(text) {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fmtMoney(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return '0';
+  return n.toFixed(2).replace(/\.00$/, '');
+}
+
+function renderBookingReviewModalContent(booking) {
+  const $body = $('#booking-modal-body');
+  if (!$body.length) return;
+  const patients = Array.isArray(booking?.patients) ? booking.patients : [];
+  const total = Number(booking?.total_amount || 0);
+  const computedSub = patients.reduce((acc, p) => acc + ((Array.isArray(p.tests) ? p.tests : []).reduce((a, t) => a + Number(t.mrp || 0), 0)), 0);
+  const computedDis = patients.reduce((acc, p) => acc + ((Array.isArray(p.tests) ? p.tests : []).reduce((a, t) => a + Number(t.discount || 0), 0)), 0);
+  const sub = Number(booking?.F_Apt_Am ?? computedSub);
+  const dis = Number(booking?.F_dis ?? computedDis);
+  const rows = patients.map((p) => {
+    const tests = Array.isArray(p.tests) ? p.tests : [];
+    const fallbackModes = String(p.selected_charge_modes || '').split(',').map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+    const panelGroups = {};
+    tests.forEach((t) => {
+      const panelName = String(t.panel_company || '').trim() || (Array.isArray(p.panel_companies) && p.panel_companies.length === 1 ? String(p.panel_companies[0] || '').trim() : '') || String(p.panel_company || '').trim() || '-';
+      let mode = String(t.selected_charge_mode || '').trim().toUpperCase();
+      if (!mode && fallbackModes.length === 1) mode = fallbackModes[0];
+      const key = `${panelName}|${mode}`;
+      if (!panelGroups[key]) panelGroups[key] = { panelName, mode, tests: [] };
+      panelGroups[key].tests.push(t);
+    });
+    const sections = Object.values(panelGroups);
+    if (!sections.length && tests.length) {
+      sections.push({
+        panelName: (Array.isArray(p.panel_companies) && p.panel_companies.length ? p.panel_companies.join(', ') : (p.panel_company || '-')),
+        mode: fallbackModes.length === 1 ? fallbackModes[0] : '',
+        tests,
+      });
+    }
+    const sectionHtml = sections.map((sec) => {
+      const chargeModeLabel = sec.mode === 'P' ? 'P (Paying)' : sec.mode === 'C' ? 'C (Credit)' : sec.mode === 'F' ? 'F (FOC)' : '';
+      const testsRows = (sec.tests || []).map((t) => `
+        <tr>
+          <td><strong>${esc([t.booked_code, t.test_name].filter(Boolean).join(' - ') || '-')}</strong></td>
+          <td class="text-end">${esc(fmtMoney(t.mrp))}</td>
+          <td class="text-end">${esc(fmtMoney(t.discount))}</td>
+          <td class="text-end"><strong>${esc(fmtMoney(t.final_charge))}</strong></td>
+          <td class="text-center">-</td>
+        </tr>
+      `).join('');
+      const sectionTotal = (sec.tests || []).reduce((acc, t) => acc + Number(t.final_charge || 0), 0);
+      return `
+      <div class="border rounded p-2 mb-2 bg-white">
+        <div class="d-flex flex-wrap gap-3 align-items-center mb-2 hc-review-top-strip">
+          <span class="hc-review-panel-chip">${esc(sec.panelName || '-')}</span>
+          ${chargeModeLabel ? `<span class="hc-review-panel-chip">${esc(chargeModeLabel)}</span>` : ''}
+          <span><strong>Test_Bkg_Status:</strong> <span style="color:#0b6b2d;font-weight:700;">${esc(tbsLabel(p.test_booking_status))}</span></span>
+        </div>
+        <div class="mb-1"><strong>Tests (${(sec.tests || []).length}):</strong></div>
+        <div class="table-responsive hc-review-tests-table-wrap">
+          <table class="table table-sm mb-0 hc-review-tests-table">
+            <thead>
+              <tr>
+                <th>Test Name</th>
+                <th class="text-end" style="width:120px;">Standard Charge</th>
+                <th class="text-end" style="width:100px;">Discount</th>
+                <th class="text-end" style="width:120px;">Final Charge</th>
+                <th class="text-center" style="width:80px;">TAT</th>
+              </tr>
+            </thead>
+            <tbody>${testsRows || '<tr><td colspan="5" class="text-muted">No tests.</td></tr>'}</tbody>
+          </table>
+        </div>
+        <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip">
+          <div class="ms-auto text-end"><strong>Charges: ${esc(fmtMoney(sectionTotal))}</strong></div>
+        </div>
+      </div>`;
+    }).join('');
+    const patientTotal = tests.reduce((acc, t) => acc + Number(t.final_charge || 0), 0);
+    return `
+    <div class="card mb-2">
+      <div class="card-body">
+        <h6 class="hc-patient-name-red"><span>Patient Name:</span> ${esc(p.full_name || '-')}</h6>
+        ${sectionHtml || '<div class="text-muted">No tests.</div>'}
+        <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip hc-review-bottom-strip-patient">
+          <div class="ms-auto text-end"><strong>Total Amount: ${esc(fmtMoney(patientTotal))}</strong></div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  $body.html(`
+    <div class="hc-review-grid mb-2">
+      <div class="hc-review-meta">
+        <div><strong>Caller:</strong> ${esc(booking.primary_mobile || '-')} | <strong>Patients:</strong> ${patients.length}</div>
+        <div><strong>Google Location:</strong> <span class="hc-review-linkish">${esc(booking.google_location || '-')}</span></div>
+        <div><strong>Referred By:</strong> ${esc(booking.referred_by || '-')}</div>
+        <div><strong>Internal Referred By:</strong> ${esc(booking.intrnl_rfrncd_by || '-')}</div>
+        <div><strong>Lead ID:</strong> ${esc(booking.lead_id || '-')}</div>
+      </div>
+      <div class="hc-review-address-card">
+        <div class="hc-review-address-title">Address:-</div>
+        <div class="hc-review-address-grid">
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">House/Flat No:</span> <span class="hc-review-addr-v">${esc(booking.house_flat_no || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">Floor:</span> <span class="hc-review-addr-v">${esc(booking.floor || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">Block/Tower No:</span> <span class="hc-review-addr-v">${esc(booking.block_tower_no || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">Street/Sector:</span> <span class="hc-review-addr-v">${esc(booking.street_line || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">Landmark:</span> <span class="hc-review-addr-v">${esc(booking.landmark || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">City:</span> <span class="hc-review-addr-v">${esc(booking.city || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">Colony:</span> <span class="hc-review-addr-v">${esc(booking.colony_name || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">Pincode:</span> <span class="hc-review-addr-v">${esc(booking.pincode || '-')}</span></div>
+          <div class="hc-review-addr-item"><span class="hc-review-addr-k">Route:</span> <span class="hc-review-addr-v">${esc(booking.route_no || '-')}</span></div>
+        </div>
+      </div>
+    </div>
+    ${rows || '<div class="text-muted">No patient details.</div>'}
+    <div id="review-net-amount">
+      <span class="hc-review-total-line"><strong>Final Sub Total:</strong> ${esc(fmtMoney(sub))}</span>
+      <span class="hc-review-total-line"><strong>Final Discount:</strong> ${esc(fmtMoney(dis))}</span>
+      <span class="hc-review-net-chip"><strong>Final Amount:</strong> ${esc(fmtMoney(total))}</span>
+    </div>
+  `);
 }
 
 function renderDocPreviewItem(url, labelPrefix) {
@@ -206,6 +343,17 @@ function sortRows(rows) {
       if (ak === bk) return String(a.route_no_snapshot || a.route_no || '').localeCompare(String(b.route_no_snapshot || b.route_no || '')) * dir;
       return (ak - bk) * dir;
     }
+    if (key === 'total_amount') {
+      const av = Number(a.total_amount || 0);
+      const bv = Number(b.total_amount || 0);
+      if (av === bv) return 0;
+      return (av - bv) * dir;
+    }
+    if (key === 'assigned_phlebo') {
+      const av = String(a.assigned_phlebo_name || '').trim().toLowerCase();
+      const bv = String(b.assigned_phlebo_name || '').trim().toLowerCase();
+      return av.localeCompare(bv) * dir;
+    }
     return 0;
   });
 }
@@ -215,6 +363,7 @@ function renderDashboardRows(rows) {
   const baseRows = [...dashboardRowsState].sort((a, b) => slotSortKey(a.preferred_time_slot) - slotSortKey(b.preferred_time_slot));
   const sortedRows = sortRows(baseRows);
   const html = sortedRows.map((r, idx) => {
+    const statusCode = Number(r.booking_status || 0);
     const bookingId = Number(r.booking_id || r.id || 0);
     const txnTag = String(r.booking_tags || '').trim();
     const patientText = String(r.patient_names || r.caller_name || '-');
@@ -226,7 +375,7 @@ function renderDashboardRows(rows) {
     return `
       <tr class="dash-data-row">
         <td class="${r.row_type === 'APPOINTMENT' ? 'dash-sr-apmt' : ''}">
-          <span class="dash-expand-trigger" data-expand-row="${rowExpandId}" data-booking-id="${bookingId}" data-row-status="${Number(r.booking_status || 0)}">
+          <span class="dash-expand-trigger" data-expand-row="${rowExpandId}" data-booking-id="${bookingId}" data-appointment-id="${Number(r.appointment_id || 0)}" data-row-type="${String(r.row_type || 'BOOKING')}" data-row-status="${Number(r.booking_status || 0)}">
             <span class="dash-expand-arrow">&#9656;</span> ${idx + 1}
           </span>
         </td>
@@ -234,7 +383,7 @@ function renderDashboardRows(rows) {
           <div class="dash-patient-mobile">
             <div>
               ${r.row_type === 'APPOINTMENT' ? `[A${r.appointment_no || '-'}] ` : ''}${patientText}
-              ${hasPatientTag ? '<span class="dash-patient-tag-indicator" title="One or more patient tags exist">*</span>' : ''}
+              ${hasPatientTag ? '<span title="Patient tag exists" style="color:#dc2626;font-size:15px;margin-left:6px;vertical-align:middle;">🏷️</span>' : ''}
             </div>
             <div class="dash-mobile-sub">${mobileText}</div>
           </div>
@@ -251,27 +400,33 @@ function renderDashboardRows(rows) {
         <td><strong>${Number(r.total_amount || 0).toFixed(2).replace(/\.00$/, '')}</strong></td>
         <td>${String(r.booked_by_name || '-').trim() || '-'}</td>
         <td>${statusBadge(r.booking_status)}</td>
+        <td>${String(r.assigned_phlebo_name || '-').trim() || '-'}</td>
         <td class="dash-actions-cell">
           <button class="btn btn-sm btn-outline-primary dash-action-btn btn-view" data-booking-id="${r.booking_id || r.id}" data-appointment-id="${r.appointment_id || 0}">View</button>
-          ${[3, 4].includes(Number(r.booking_status))
+          ${[3, 4].includes(statusCode)
             ? '<button class="btn btn-sm btn-outline-secondary dash-action-btn" type="button" disabled>Modify</button>'
             : `<button class="btn btn-sm btn-outline-secondary dash-action-btn btn-modify" data-booking-id="${r.booking_id || r.id}" data-appointment-id="${r.appointment_id || 0}">Modify</button>`}
-          <button class="btn btn-sm btn-outline-warning dash-action-btn btn-assign" data-booking-id="${r.booking_id || r.id}" data-appointment-id="${r.appointment_id || 0}">Assign</button>
+          ${statusCode === 1
+            ? `<button class="btn btn-sm dash-action-btn btn-reassign" style="background:#0b1f4d;color:#fff;border-color:#0b1f4d;" data-booking-id="${r.booking_id || r.id}" data-appointment-id="${r.appointment_id || 0}">ReAsgn</button>`
+            : ([2, 3, 4].includes(statusCode)
+              ? '<button class="btn btn-sm btn-outline-secondary dash-action-btn" type="button" disabled>Assign</button>'
+              : `<button class="btn btn-sm btn-outline-warning dash-action-btn btn-assign" data-booking-id="${r.booking_id || r.id}" data-appointment-id="${r.appointment_id || 0}">Assign</button>`)}
         </td>
       </tr>
       <tr id="${rowExpandId}" class="dash-expand-row d-none">
-        <td colspan="10"><div class="dash-expand-content"></div></td>
+        <td colspan="11"><div class="dash-expand-content"></div></td>
       </tr>
     `;
   }).join('');
 
-  $('#dashboard-table tbody').html(html || '<tr class="dash-empty-row"><td colspan="10" class="text-center">No records</td></tr>');
+  $('#dashboard-table tbody').html(html || '<tr class="dash-empty-row"><td colspan="11" class="text-center">No records</td></tr>');
   bindRowActions();
   bindExpandActions();
 }
 
-function renderExpandedDetails(b, rowStatusCode) {
+function renderExpandedDetails(b, rowStatusCode, bookingId, appointmentId, rowType) {
   const patients = Array.isArray(b.patients) ? b.patients : [];
+  const isAppointment = String(rowType || '').toUpperCase() === 'APPOINTMENT' || Number(appointmentId || 0) > 0;
   const patientBlocks = patients.map((p, idx) => {
     const docUrls = Array.isArray(p.patient_document_urls) ? p.patient_document_urls : [];
     const rxUrls = Array.isArray(p.prescription_urls) ? p.prescription_urls : [];
@@ -303,14 +458,14 @@ function renderExpandedDetails(b, rowStatusCode) {
         <div><strong>Internal Referred By:</strong> ${b.intrnl_rfrncd_by || '-'}</div>
       </div>
       <div class="dash-expand-booking-meta-right">
-        ${Number(rowStatusCode || 0) !== 4
-          ? `<button class="btn btn-sm btn-outline-info dash-action-btn dash-expand-action-bookappt" data-booking-id="${Number(b.id || 0)}">Book Appt</button>`
+        ${(!isAppointment && Number(rowStatusCode || 0) !== 4)
+          ? `<button class="btn btn-sm btn-outline-info dash-action-btn dash-expand-action-bookappt" data-booking-id="${Number(bookingId || b.id || 0)}">Book Appt</button>`
           : ''}
         ${[0, 1].includes(Number(rowStatusCode || 0))
-          ? `<button class="btn btn-sm btn-outline-secondary dash-action-btn dash-expand-action-reschedule" data-booking-id="${Number(b.id || 0)}">Reschedule</button>`
+          ? `<button class="btn btn-sm btn-outline-secondary dash-action-btn dash-expand-action-reschedule" data-booking-id="${Number(bookingId || b.id || 0)}">Reschedule</button>`
           : ''}
         ${Number(rowStatusCode || 0) !== 4
-          ? `<button class="btn btn-sm btn-outline-danger dash-action-btn dash-expand-action-cancel" data-booking-id="${Number(b.id || 0)}">Cancel</button>`
+          ? `<button class="btn btn-sm btn-outline-danger dash-action-btn dash-expand-action-cancel" data-booking-id="${Number(bookingId || b.id || 0)}" data-appointment-id="${Number(appointmentId || 0)}">Cancel</button>`
           : ''}
       </div>
     </div>
@@ -322,6 +477,8 @@ function bindExpandActions() {
   $('[data-expand-row]').off('click').on('click', function () {
     const rowId = String($(this).data('expand-row') || '');
     const bookingId = Number($(this).data('booking-id') || 0);
+    const appointmentId = Number($(this).data('appointment-id') || 0);
+    const rowType = String($(this).data('row-type') || 'BOOKING');
     const rowStatusCode = Number($(this).data('row-status') || 0);
     const $parentRow = $(this).closest('tr');
     const $detailRow = $(`#${rowId}`);
@@ -341,9 +498,12 @@ function bindExpandActions() {
     $content.html('Loading...');
     $arrow.html('&#9662;');
     $parentRow.addClass('row-expanded');
-    $.get(`/hhome-collection/booking/${bookingId}`, function (res) {
+    const detailUrl = appointmentId > 0
+      ? `/hhome-collection/booking/${bookingId}?appointment_id=${appointmentId}`
+      : `/hhome-collection/booking/${bookingId}`;
+    $.get(detailUrl, function (res) {
       const b = res.booking || {};
-      $content.html(renderExpandedDetails(b, rowStatusCode));
+      $content.html(renderExpandedDetails(b, rowStatusCode, bookingId, appointmentId, rowType));
       $content.find('.dash-expand-action-bookappt').off('click').on('click', function () {
         openBookAppointmentReasonModal(Number($(this).data('booking-id') || 0));
       });
@@ -351,7 +511,10 @@ function bindExpandActions() {
         openRescheduleModal(Number($(this).data('booking-id') || 0));
       });
       $content.find('.dash-expand-action-cancel').off('click').on('click', function () {
-        openCancelReasonModal({ booking_id: Number($(this).data('booking-id') || 0), appointment_id: 0 });
+        openCancelReasonModal({
+          booking_id: Number($(this).data('booking-id') || 0),
+          appointment_id: Number($(this).data('appointment-id') || 0),
+        });
       });
       $('.js-doc-preview').off('click').on('click', function () {
         const src = String($(this).data('src') || $(this).attr('src') || '');
@@ -546,6 +709,11 @@ function openBookAppointmentReasonModal(bookingId) {
   $('#btn-open-modify-flow').off('click').on('click', function () {
     const reason = String($('#modify-reason-free').val() || '').trim();
     if (!reason) return alert('Reason is required.');
+    const $btn = $(this);
+    $btn.prop('disabled', true);
+    $('.hd-loader-text').text('Opening Book Appointment...');
+    setDashboardPageLoading(true);
+    $('#h-dashboard-page').addClass('is-leaving');
     $.ajax({
       url: '/hhome-collection/book-appointment-init',
       method: 'POST',
@@ -554,10 +722,14 @@ function openBookAppointmentReasonModal(bookingId) {
       success: function (res) {
         m.hide();
         $title.text(prevTitle);
-        const target = res?.redirect_url || '/hhome-collection?mode=modify';
+        const target = res?.redirect_url || '/hhome-collection?mode=book-appointment';
         window.location.href = target;
       },
       error: function (xhr) {
+        $btn.prop('disabled', false);
+        $('#h-dashboard-page').removeClass('is-leaving');
+        $('.hd-loader-text').text('Loading All Booking...');
+        setDashboardPageLoading(false);
         alert(xhr.responseJSON?.message || 'Unable to start appointment flow');
       }
     });
@@ -590,6 +762,11 @@ function openModifyReasonModal(bookingTarget) {
       return String($(this).val() || '').trim();
     }).get().filter(Boolean).join(',');
     if (!reason) return alert('Modify reason is required.');
+    const $btn = $(this);
+    $btn.prop('disabled', true);
+    $('.hd-loader-text').text('Opening Modify Flow...');
+    setDashboardPageLoading(true);
+    $('#h-dashboard-page').addClass('is-leaving');
 
     $.ajax({
       url: '/hhome-collection/modify-init',
@@ -598,10 +775,14 @@ function openModifyReasonModal(bookingTarget) {
       data: JSON.stringify({ booking_id: bookingId, appointment_id: appointmentId, reason_text: reason }),
       success: function (res) {
         m.hide();
-        const target = res?.redirect_url || '/hhome-collection?mode=modify';
+        const target = res?.redirect_url || '/hhome-collection?mode=book-appointment';
         window.location.href = target;
       },
       error: function (xhr) {
+        $btn.prop('disabled', false);
+        $('#h-dashboard-page').removeClass('is-leaving');
+        $('.hd-loader-text').text('Loading All Booking...');
+        setDashboardPageLoading(false);
         alert(xhr.responseJSON?.message || 'Unable to start modify flow');
       }
     });
@@ -684,31 +865,33 @@ function openRescheduleModal(bookingId) {
 function bindRowActions() {
   $('.btn-view').off('click').on('click', function () {
     const bookingId = Number($(this).data('booking-id') || 0);
-    $.get(`/hhome-collection/booking/${bookingId}`, function (res) {
+    const appointmentId = Number($(this).data('appointment-id') || 0);
+    if (!bookingId) return;
+    $('#bookingModal .modal-title').text('Booking Details');
+    $('#booking-modal-body').html('<div class="text-muted">Loading...</div>');
+    $('#booking-modal-footer').removeClass('d-none');
+    $('#booking-modal-print-btn').off('click').on('click', function () {
+      window.open(`/hhome-collection/print/${bookingId}`, '_blank');
+    });
+    new bootstrap.Modal(document.getElementById('bookingModal')).show();
+    const detailUrl = appointmentId > 0
+      ? `/hhome-collection/booking/${bookingId}?appointment_id=${appointmentId}`
+      : `/hhome-collection/booking/${bookingId}`;
+    $.get(detailUrl, function (res) {
       const b = res.booking;
-      $('#bookingModal .modal-title').text('Booking Detail');
-      const patients = (b.patients || []).map(p => `
-        <li>
-          <div><strong>${p.full_name}</strong></div>
-          <div class="small text-muted">Tests: ${p.tests_display || '-'}</div>
-        </li>
-      `).join('');
-      $('#booking-modal-body').html(`
-        <p><strong>${b.booking_code}</strong> | ${b.preferred_visit_date} ${b.preferred_time_slot}</p>
-        <p>Caller: ${b.caller_name} (${b.primary_mobile})</p>
-        <p>Address: ${b.house_flat_no}, ${b.floor || ''}, ${b.block_tower_no || ''}, ${b.colony_name_snapshot}</p>
-        <p>Status: ${statusText(b.booking_status)}</p>
-        <ul>${patients}</ul>
-      `);
-      $('#booking-modal-footer').removeClass('d-none');
-      $('#booking-modal-print-btn').off('click').on('click', function () {
-        window.open(`/hhome-collection/print/${b.id}`, '_blank');
-      });
-      new bootstrap.Modal(document.getElementById('bookingModal')).show();
+      renderBookingReviewModalContent(b || {});
+    }).fail(function (xhr) {
+      $('#booking-modal-body').html(`<div class="text-danger">${esc(xhr?.responseJSON?.message || 'Unable to load details')}</div>`);
     });
   });
 
   $('.btn-assign').off('click').on('click', function () {
+    bindAssignForSingleBooking({
+      booking_id: Number($(this).data('booking-id') || 0),
+      appointment_id: Number($(this).data('appointment-id') || 0),
+    });
+  });
+  $('.btn-reassign').off('click').on('click', function () {
     bindAssignForSingleBooking({
       booking_id: Number($(this).data('booking-id') || 0),
       appointment_id: Number($(this).data('appointment-id') || 0),

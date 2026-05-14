@@ -85,6 +85,17 @@
       .replaceAll("'", '&#39;');
   }
 
+  function shortCityName(raw) {
+    const city = String(raw || '').trim().toLowerCase();
+    if (!city) return '';
+    if (city === 'delhi' || city === 'new delhi') return 'Del';
+    if (city === 'gurgram' || city === 'gurugram' || city === 'gurgaon') return 'Grgm';
+    if (city === 'noida') return 'Nda';
+    if (city === 'ghaziabad') return 'Gzbd';
+    if (city === 'faridabad' || city === 'fardaabd') return 'Frdbd';
+    return String(raw || '').trim();
+  }
+
   function fmtMoney(v) {
     const n = Number(v || 0);
     if (!Number.isFinite(n)) return '0';
@@ -111,43 +122,71 @@
     const dis = Number(booking?.F_dis ?? computedDis);
     const rows = patients.map((p) => {
       const tests = Array.isArray(p.tests) ? p.tests : [];
-      const testsRows = tests.map((t) => `
-        <tr>
-          <td><strong>${esc([t.booked_code, t.test_name].filter(Boolean).join(' - ') || '-')}</strong></td>
-          <td class="text-end">${esc(fmtMoney(t.mrp))}</td>
-          <td class="text-end">${esc(fmtMoney(t.discount))}</td>
-          <td class="text-end"><strong>${esc(fmtMoney(t.final_charge))}</strong></td>
-          <td class="text-center">-</td>
-        </tr>
-      `).join('');
+      const fallbackModes = String(p.selected_charge_modes || '').split(',').map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+      const panelGroups = {};
+      tests.forEach((t) => {
+        const panelName = String(t.panel_company || '').trim() || (Array.isArray(p.panel_companies) && p.panel_companies.length === 1 ? String(p.panel_companies[0] || '').trim() : '') || String(p.panel_company || '').trim() || '-';
+        let mode = String(t.selected_charge_mode || '').trim().toUpperCase();
+        if (!mode && fallbackModes.length === 1) mode = fallbackModes[0];
+        const key = `${panelName}|${mode}`;
+        if (!panelGroups[key]) panelGroups[key] = { panelName, mode, tests: [] };
+        panelGroups[key].tests.push(t);
+      });
+      const sections = Object.values(panelGroups);
+      if (!sections.length && tests.length) {
+        sections.push({
+          panelName: (Array.isArray(p.panel_companies) && p.panel_companies.length ? p.panel_companies.join(', ') : (p.panel_company || '-')),
+          mode: fallbackModes.length === 1 ? fallbackModes[0] : '',
+          tests,
+        });
+      }
+      const sectionHtml = sections.map((sec) => {
+        const chargeModeLabel = sec.mode === 'P' ? 'P (Paying)' : sec.mode === 'C' ? 'C (Credit)' : sec.mode === 'F' ? 'F (FOC)' : '';
+        const testsRows = (sec.tests || []).map((t) => `
+          <tr>
+            <td><strong>${esc([t.booked_code, t.test_name].filter(Boolean).join(' - ') || '-')}</strong></td>
+            <td class="text-end">${esc(fmtMoney(t.mrp))}</td>
+            <td class="text-end">${esc(fmtMoney(t.discount))}</td>
+            <td class="text-end"><strong>${esc(fmtMoney(t.final_charge))}</strong></td>
+            <td class="text-center">-</td>
+          </tr>
+        `).join('');
+        const sectionTotal = (sec.tests || []).reduce((acc, t) => acc + Number(t.final_charge || 0), 0);
+        return `
+        <div class="border rounded p-2 mb-2 bg-white">
+          <div class="d-flex flex-wrap gap-3 align-items-center mb-2 hc-review-top-strip">
+            <span class="hc-review-panel-chip">${esc(sec.panelName || '-')}</span>
+            ${chargeModeLabel ? `<span class="hc-review-panel-chip">${esc(chargeModeLabel)}</span>` : ''}
+            <span><strong>Test_Bkg_Status:</strong> <span style="color:#0b6b2d;font-weight:700;">${esc(tbsLabel(p.test_booking_status))}</span></span>
+          </div>
+          <div class="mb-1"><strong>Tests (${(sec.tests || []).length}):</strong></div>
+          <div class="table-responsive hc-review-tests-table-wrap">
+            <table class="table table-sm mb-0 hc-review-tests-table">
+              <thead>
+                <tr>
+                  <th>Test Name</th>
+                  <th class="text-end" style="width:120px;">Standard Charge</th>
+                  <th class="text-end" style="width:100px;">Discount</th>
+                  <th class="text-end" style="width:120px;">Final Charge</th>
+                  <th class="text-center" style="width:80px;">TAT</th>
+                </tr>
+              </thead>
+              <tbody>${testsRows || '<tr><td colspan="5" class="text-muted">No tests.</td></tr>'}</tbody>
+            </table>
+          </div>
+          <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip">
+            <div class="ms-auto text-end"><strong>Charges: ${esc(fmtMoney(sectionTotal))}</strong></div>
+          </div>
+        </div>`;
+      }).join('');
       const patientTotal = tests.reduce((acc, t) => acc + Number(t.final_charge || 0), 0);
       return `
       <div class="card mb-2">
         <div class="card-body">
           <h6 class="hc-patient-name-red"><span>Patient Name:</span> ${esc(p.full_name || '-')}</h6>
-          <div class="border rounded p-2 mb-2 bg-white">
-            <div class="d-flex flex-wrap gap-3 align-items-center mb-2 hc-review-top-strip">
-              <span class="hc-review-panel-chip">${esc(Array.isArray(p.panel_companies) && p.panel_companies.length ? p.panel_companies.join(', ') : (p.panel_company || '-'))}</span>
-              <span><strong>Test_Bkg_Status:</strong> <span style="color:#0b6b2d;font-weight:700;">${esc(tbsLabel(p.test_booking_status))}</span></span>
-            </div>
-            <div class="mb-1"><strong>Tests (${tests.length}):</strong></div>
-            <div class="table-responsive hc-review-tests-table-wrap">
-              <table class="table table-sm mb-0 hc-review-tests-table">
-                <thead>
-                  <tr>
-                    <th>Test Name</th>
-                    <th class="text-end" style="width:120px;">Standard Charge</th>
-                    <th class="text-end" style="width:100px;">Discount</th>
-                    <th class="text-end" style="width:120px;">Final Charge</th>
-                    <th class="text-center" style="width:80px;">TAT</th>
-                  </tr>
-                </thead>
-                <tbody>${testsRows || '<tr><td colspan="5" class="text-muted">No tests.</td></tr>'}</tbody>
-              </table>
-            </div>
-            <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip">
-              <div class="ms-auto text-end"><strong>Charges: ${esc(fmtMoney(patientTotal))}</strong></div>
-            </div>
+          ${sectionHtml || '<div class="text-muted">No tests.</div>'}
+          <div class="d-flex flex-wrap align-items-center justify-content-between mt-2 hc-review-bottom-strip hc-review-bottom-strip-patient">
+            <div class="ms-auto text-end"><strong>Total Amount: ${esc(fmtMoney(patientTotal))}</strong></div>
           </div>
         </div>
       </div>`;
@@ -270,9 +309,11 @@
           html += '<div class="asg-empty">-</div>';
         } else {
           items.forEach(b => {
-            const colony = esc(b.colony_name_snapshot || '');
-            const city = esc(b.city || '');
-            const place = [colony, city].filter(Boolean).join(', ');
+            const colony = esc(b.colony_name || b.colony_name_snapshot || '');
+            const pincode = esc(b.pincode || '');
+            const city = esc(shortCityName(b.city || ''));
+            const placeLead = colony || pincode;
+            const place = `${placeLead || '-'}${city ? `, <span class="asg-city-short">${city}</span>` : ''}`;
             const callerMobile = esc(b.caller_mobile || '');
             const callerMobileDisplay = callerMobile ? `(${callerMobile})` : '(-)';
             const patientCount = Number(b.patient_count || 0);
@@ -285,7 +326,7 @@
             html += `
               <div class="asg-booking ${hasPatientTags ? 'has-patient-tag' : ''}" draggable="true" data-booking-id="${b.booking_id}" data-detail-booking-id="${detailBookingId}" data-hover-text="${hoverText}">
                 ${extraCount > 0 ? `<div class="asg-extra-pill">+${extraCount}</div>` : ''}
-                <div class="asg-baddr">${place || '-'}</div>
+                <div class="asg-baddr">${place}</div>
                 <div class="asg-bmob">${callerMobileDisplay}</div>
               </div>
             `;
