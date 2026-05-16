@@ -9,7 +9,8 @@ service = HHomeCollectionCore()
 
 @hhome_collection_bp.get("/hhome-collection")
 def wizard():
-    is_modify_mode = (request.args.get("mode") or "").strip().lower() == "modify"
+    mode = (request.args.get("mode") or "").strip().lower()
+    is_modify_mode = mode in {"modify", "book-appointment"}
     has_modify_ctx = bool(session.get("hmodify_context"))
     if not (is_modify_mode and has_modify_ctx):
         service.clear_booking_session(session)
@@ -622,7 +623,6 @@ def print_slip(booking_id: int):
     if not booking:
         return "Booking not found", 404
     return render_template("hhome_collection/hprint_slip.html", booking=booking)
-
 
 
 

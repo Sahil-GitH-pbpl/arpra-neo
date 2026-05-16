@@ -2,13 +2,12 @@
 {% block title %}Home Collection Phlebo Summary{% endblock %}
 {% block content %}
 <style>
-  .phlebo-summary-page { font-family: 'Segoe UI', sans-serif; background-color: #f4f4f4; min-height: calc(100vh - 120px); padding: 10px 0 20px; }
+  .phlebo-summary-page { font-family: 'Segoe UI', sans-serif; background-color: #f4f4f4; min-height: calc(100vh - 120px); padding: 0 0 20px; }
     .phlebo-summary-page .summary-shell {
-      margin: 4px 4px 0;
-    background: linear-gradient(180deg, #ffffff 0%, #f6f8fb 100%);
+      margin: -10px 4px 0;
     border: 1px solid #d8dde6;
     border-radius: 14px;
-    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+    box-shadow: 0 6px 18px rgba(5, 72, 228, 0.4);
     padding: 8px 12px;
   }
   .phlebo-summary-page .header-container { display: flex; justify-content: space-between; align-items: stretch; gap: 16px; flex-wrap: nowrap; }
@@ -55,7 +54,7 @@
     .phlebo-summary-page .legend .status-2 { background-color: #559bf7; }
     .phlebo-summary-page .legend .status-3 { background-color: #b4e2b6; }
     .phlebo-summary-page .legend .status-4 { background-color: #ebaeb4; }
-    .phlebo-summary-page .table-wrapper { display: flex; flex-direction: column; margin: 15px 4px; background: white; border: 1px solid #ccc; }
+    .phlebo-summary-page .table-wrapper { display: flex; flex-direction: column; margin: 6px 4px; background: white; border: 1px solid #ccc; }
   .phlebo-summary-page .table-horizontal-scroll { overflow-x: auto; overflow-y: hidden; width: 100%; scrollbar-color: #0D47A1 #BBDEFB; scrollbar-width: thin; }
   .phlebo-summary-page .table-horizontal-scroll::-webkit-scrollbar { height: 20px; }
   .phlebo-summary-page .table-horizontal-scroll::-webkit-scrollbar-track { background: #BBDEFB; }
@@ -79,6 +78,7 @@
   .phlebo-summary-page .ls-indicator { background-color: #ff9800; }
   .phlebo-summary-page .lc-indicator { background-color: #f44336; }
   .phlebo-summary-page .ns-indicator { background-color: #9c27b0; }
+  .phlebo-summary-page .booking-colony { font-weight: 700; color: navy; font-size: 12px; }
   .phlebo-summary-page .loader-container { display: flex; justify-content: center; align-items: center; height: 200px; }
   .phlebo-summary-page .loader-dots { display: flex; gap: 12px; }
   .phlebo-summary-page .loader-dot { width: 16px; height: 16px; border-radius: 50%; animation: bounce 0.6s infinite alternate; }
@@ -364,9 +364,10 @@
             return bSlotStartMins === slotStartMins && String(label).trim() === String(entry).trim();
           });
             const cellContents = matchingBookings.map((b) => {
-              const area = (b.colony_name_snapshot || b.city || "").trim();
+              const colony = (b.colony_name_snapshot || b.colony_name || "").trim();
+              const city = (b.city || "").trim();
               const mobile = (b.caller_mobile || "").trim();
-              const text = area + (mobile ? ` (${mobile})` : "");
+              const text = `${colony ? `<span class="booking-colony">${colony}</span>${city ? `, ${city}` : ""}` : (city || "-")}${mobile ? `<br>(${mobile})` : ""}`;
             const stat = getVisualStatusClass(b);
             const lateStatus = checkLateStatus(b, slotStartMins, slotEndMins);
             let indicatorsHtml = "";
@@ -426,4 +427,3 @@
 
 </script>
 {% endblock %}
-

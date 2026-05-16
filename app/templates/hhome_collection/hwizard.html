@@ -10,10 +10,10 @@
   </div>
 
   <div class="wizard-steps mb-3">
-    <button type="button" class="step-pill active" data-step="1">1. Search & Select</button>
-    <button type="button" class="step-pill" data-step="2">2. Appointment</button>
-    <button type="button" class="step-pill" data-step="3">3. Tests & Billing</button>
-    <button type="button" class="step-pill" data-step="4">4. Review & Submit</button>
+    <button type="button" class="step-pill active" data-step="1">🔎 1. Search & Select</button>
+    <button type="button" class="step-pill" data-step="2">📅 2. Appointment</button>
+    <button type="button" class="step-pill" data-step="3">🧪 3. Tests & Billing</button>
+    <button type="button" class="step-pill" data-step="4">✅ 4. Review & Submit</button>
   </div>
 
   <div class="row g-3">
@@ -78,6 +78,12 @@
     </div>
   </div>
 </div>
+<div id="hc-page-loader" class="hd-page-loader d-none">
+  <div class="hd-loader-card">
+    <div class="spinner-border text-primary mb-2" role="status" aria-hidden="true"></div>
+    <div class="hd-loader-text">Saving booking...</div>
+  </div>
+</div>
 <div class="modal fade" id="phleboTagModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content">
@@ -99,6 +105,6 @@
 <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 <script defer src="{{ url_for('static', filename='js/hassign_user_picker.js', v='20260429-1') }}"></script>
-<script defer src="{{ url_for('static', filename='js/hhome_collection.js', v='20260501-3') }}"></script>
+<script defer src="{{ url_for('static', filename='js/hhome_collection.js', v='20260506-1') }}"></script>
 {% endblock %}
 

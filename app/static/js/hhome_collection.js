@@ -21,6 +21,7 @@ let tagOptions = {
 };
 let editingPatientId = null;
 let editingAddressId = null;
+let addressColonyCatalog = [];
 let slotPlannerModal = null;
 let panelTestsModal = null;
 let slotSelectedRoute = '';
@@ -648,6 +649,23 @@ function bindStepEvents() {
       syncFloorFieldState();
       validateFloorField();
     });
+    $('#a-colony-manual').off('change').on('change', function () {
+      if ($(this).is(':checked')) {
+        $('#a-colony').val('').trigger('change');
+        $('#a-pincode').val('');
+        $('#a-route').val('');
+      } else {
+        $('#a-colony-free').val('');
+      }
+      syncAddressColonyMode();
+      if (isAddressColonyManualMode()) {
+        updateRouteFromManualPincode();
+      }
+    });
+    $('#a-pincode').off('input.manualPincode').on('input.manualPincode', function () {
+      if (!isAddressColonyManualMode()) return;
+      updateRouteFromManualPincode();
+    });
     initPatientTagPicker();
   wirePatientPanelSuggest();
     $(document).off('change', '#a-city').on('change', '#a-city', function () {
@@ -784,6 +802,8 @@ function resetAddressFormState() {
   $('#a-floor-special').val('');
   $('#a-city').val('');
   $('#a-colony').val('').trigger('change');
+  $('#a-colony-free').val('').addClass('d-none');
+  $('#a-colony-manual').prop('checked', false);
   $('#a-pincode').val('');
   $('#a-route').val('');
   $('#a-block').val('');
@@ -792,6 +812,58 @@ function resetAddressFormState() {
   $('#a-google-location').val('');
   $('#a-access').val('');
   syncFloorFieldState();
+  syncAddressColonyMode();
+}
+
+function isAddressColonyManualMode() {
+  return $('#a-colony-manual').is(':checked');
+}
+
+function sanitizePincodeInput(raw) {
+  return String(raw || '').replace(/[^\d]/g, '').slice(0, 6);
+}
+
+function syncAddressColonyMode() {
+  const manual = isAddressColonyManualMode();
+  const $colony = $('#a-colony');
+  const $colonyFree = $('#a-colony-free');
+  const $pincode = $('#a-pincode');
+  const $route = $('#a-route');
+
+  if (manual) {
+    $colony.prop('required', false).closest('.select2-container').hide();
+    if ($colony.hasClass('select2-hidden-accessible')) {
+      $colony.next('.select2').addClass('d-none');
+    }
+    $colony.addClass('d-none');
+    $colonyFree.removeClass('d-none').prop('required', true);
+    $pincode.prop('readonly', false).attr('maxlength', '6').attr('inputmode', 'numeric');
+    $route.prop('readonly', true);
+  } else {
+    $colony.removeClass('d-none').prop('required', true);
+    if ($colony.hasClass('select2-hidden-accessible')) {
+      $colony.next('.select2').removeClass('d-none');
+    }
+    $colonyFree.addClass('d-none').prop('required', false);
+    $pincode.prop('readonly', true).removeAttr('maxlength').removeAttr('inputmode');
+  }
+}
+
+function updateRouteFromManualPincode() {
+  if (!isAddressColonyManualMode()) return;
+  const city = String($('#a-city').val() || '').trim().toLowerCase();
+  const pincode = sanitizePincodeInput($('#a-pincode').val());
+  $('#a-pincode').val(pincode);
+  if (pincode.length !== 6) {
+    $('#a-route').val('');
+    return;
+  }
+  const mapped = (addressColonyCatalog || []).find((c) => {
+    const cCity = String(c.city || '').trim().toLowerCase();
+    const cPin = String(c.pincode || '').trim();
+    return cCity === city && cPin === pincode && String(c.route_no || '').trim();
+  });
+  $('#a-route').val(mapped ? String(mapped.route_no || '').trim() : '');
 }
 
 function clearFloorValidity() {
@@ -847,6 +919,8 @@ function getAddressPayload() {
   const selectedSpecial = String($('#a-floor-special').val() || '').trim();
   const floorChecked = selectedSpecial.length > 0;
   const floorValue = String($('#a-floor').val() || '').trim();
+  const manualColony = isAddressColonyManualMode();
+  const manualColonyName = String($('#a-colony-free').val() || '').trim();
   return {
     address_type: $('#a-type').val(),
     house_flat_no: $('#a-house').val().trim(),
@@ -856,8 +930,10 @@ function getAddressPayload() {
     street_sector: $('#a-street').val().trim(),
     landmark: $('#a-landmark').val().trim(),
     city: $('#a-city').val(),
-    colony_id: $('#a-colony').val(),
-    pincode: $('#a-pincode').val().trim(),
+    colony_id: manualColony ? '' : $('#a-colony').val(),
+    colony_not_found: manualColony,
+    colony_name: manualColony ? manualColonyName : '',
+    pincode: sanitizePincodeInput($('#a-pincode').val().trim()),
     route: $('#a-route').val().trim(),
     google_location: $('#a-google-location').val().trim(),
     access_notes: $('#a-access').val().trim()
@@ -1147,6 +1223,7 @@ function hydrateStep1FromSession() {
       renderSelectedTags($('#ap-booking-tags'), selectedBookingTags, 'ap-booking-tag-remove');
       refreshTagDropdowns();
       wizardData.testsBilling = ctx.tests_billing_map || {};
+      wizardData.modify.pending_tests_map = ctx.pending_tests_map || {};
       wizardData.searchedMobile = ctx.searched_mobile || wizardData.searchedMobile;
     } else {
       wizardData.modify = {};
@@ -1285,8 +1362,12 @@ function startEditAddress(addressId) {
     $('#a-access').val(a.access_notes || '');
     $('#a-pincode').val(a.pincode || '');
     $('#a-route').val(a.route_no || '');
+    $('#a-colony-free').val(a.colony_name || '');
 
     syncFloorFieldState();
+    const manual = !(Number(a.colony_id || 0) > 0);
+    $('#a-colony-manual').prop('checked', manual);
+    syncAddressColonyMode();
     loadColonies(false, String(a.colony_id || ''));
   }).fail(function (xhr) {
     alert(xhr.responseJSON?.message || 'Unable to load address details');
@@ -1489,9 +1570,12 @@ function loadColonies(resetSelection, desiredColonyId = '') {
   const prevSelected = resetSelection ? '' : ($('#a-colony').val() || '');
   $.get('/hhome-collection/colonies', { city: city }, function (res) {
     if (requestId !== colonyRequestSeq) return;
+    addressColonyCatalog = Array.isArray(res.colonies) ? res.colonies : [];
     const options = ['<option value="">Select Colony</option>'];
-    (res.colonies || []).forEach(c => {
-      options.push(`<option value="${c.id}" data-pincode="${c.pincode}" data-route="${c.route_no}">${c.colony_name}</option>`);
+    (addressColonyCatalog || []).forEach(c => {
+      const name = String(c.colony_name || '').trim();
+      if (!name) return;
+      options.push(`<option value="${c.id}" data-pincode="${c.pincode}" data-route="${c.route_no}">${name}</option>`);
     });
     const $colony = $('#a-colony');
     if ($colony.hasClass('select2-hidden-accessible')) {
@@ -1541,6 +1625,10 @@ function loadColonies(resetSelection, desiredColonyId = '') {
       $('#a-route').val('');
       $colony.trigger('change');
     }
+    syncAddressColonyMode();
+    if (isAddressColonyManualMode()) {
+      updateRouteFromManualPincode();
+    }
   });
 }
 
@@ -1563,10 +1651,13 @@ function saveAddress() {
   }
 
   const data = getAddressPayload();
+  const manualColony = Boolean(data.colony_not_found);
   if (!data.house_flat_no) return alert('House/Flat No is required.');
   if (!data.city) return alert('City is required.');
-  if (!data.colony_id) return alert('Colony is required.');
-  if (!data.pincode || !data.route) return alert('Pincode and route must auto-fill from the selected colony.');
+  if (!manualColony && !data.colony_id) return alert('Colony is required.');
+  if (manualColony && !data.colony_name) return alert('Colony name is required.');
+  if (!data.pincode || data.pincode.length !== 6) return alert('Enter valid 6 digit pincode.');
+  if (!data.route) return alert('No route mapping found for selected city and pincode.');
 
   const isEdit = !!editingAddressId;
   $.ajax({
@@ -1804,6 +1895,84 @@ function renderReviewTestsHtml(selectedTests, catalog, applyDiscount = true) {
     </div>
   `;
   return { html, total, subtotal, discountTotal, tubes: Array.from(tubeSet) };
+}
+
+function getPendingTestsForPatientFromModifyContext(patientId) {
+  const pid = String(patientId || '');
+  if (!pid) return [];
+  const pendingMap = wizardData?.modify?.pending_tests_map || {};
+  const pTb = pendingMap[pid] || pendingMap[Number(pid)] || null;
+  if (!pTb || typeof pTb !== 'object') return [];
+
+  const out = [];
+  const pushList = (rows, rootCode = '') => {
+    (rows || []).forEach((t) => {
+      if (!t || typeof t !== 'object') return;
+      const code = String(t.booked_code || '').trim();
+      if (!code) return;
+      const directRoot = String(t.root_booked_code || '').trim();
+      out.push({
+        booked_code: code,
+        description: String(t.description || code).trim(),
+        parent_booked_code: String(t.parent_booked_code || '').trim(),
+        root_booked_code: directRoot || String(rootCode || '').trim(),
+        charge: 0,
+        mrp: 0,
+        max_discount: 0,
+        max_allowed_discount: 0
+      });
+    });
+  };
+
+  pushList(pTb.selected_tests, pTb?.parent?.booked_code || '');
+  (pTb.panels || []).forEach((sec) => pushList(sec?.selected_tests || [], pTb?.parent?.booked_code || ''));
+  (pTb.items || []).forEach((it) => pushList(it?.pending || [], pTb?.parent?.booked_code || ''));
+  return out;
+}
+
+function applyPendingChildOverlay(selectedTests, pendingTests) {
+  const original = Array.isArray(selectedTests) ? selectedTests : [];
+  const pending = Array.isArray(pendingTests) ? pendingTests : [];
+  if (!pending.length) return original;
+
+  const pendingByParent = {};
+  const pendingOrphans = [];
+  pending.forEach((p) => {
+    const parent = String(p.root_booked_code || p.parent_booked_code || '').trim().toUpperCase();
+    if (parent) {
+      pendingByParent[parent] = pendingByParent[parent] || [];
+      pendingByParent[parent].push(p);
+    } else {
+      pendingOrphans.push(p);
+    }
+  });
+
+  const replaced = [];
+  const usedParents = new Set();
+  original.forEach((t) => {
+    const code = String(t?.booked_code || '').trim().toUpperCase();
+    const repl = code ? (pendingByParent[code] || []) : [];
+    if (repl.length) {
+      repl.forEach((x) => replaced.push(x));
+      usedParents.add(code);
+    } else {
+      replaced.push(t);
+    }
+  });
+  Object.entries(pendingByParent).forEach(([parentCode, list]) => {
+    if (!usedParents.has(parentCode)) {
+      list.forEach((x) => replaced.push(x));
+    }
+  });
+  pendingOrphans.forEach((x) => replaced.push(x));
+
+  const seen = new Set();
+  return replaced.filter((t) => {
+    const code = String(t?.booked_code || '').trim().toUpperCase();
+    if (!code || seen.has(code)) return false;
+    seen.add(code);
+    return true;
+  });
 }
 
 function hydrateStep2() {
@@ -2063,6 +2232,12 @@ function ensureTbObject(pid) {
 function normalizePatientTbs(raw) {
   const n = Number(raw);
   if (n >= 1 && n <= 4) return n;
+  const txt = String(raw || '').trim().toLowerCase();
+  if (!txt) return null;
+  if (txt === 'test confirmed and booked') return 1;
+  if (txt === 'prescription attached but test not booked') return 2;
+  if (txt === 'no test information: ask to patient for tests') return 3;
+  if (txt === 'incompleted test, phlebo verification pending to confirm and book') return 4;
   return null;
 }
 
@@ -2978,6 +3153,9 @@ function renderReview() {
       const rows = patients.map(p => {
         const pid = String(p.patient_id);
         const tb = ensureTbObject(pid);
+        const modifyFlow = String(wizardData?.modify?.flow_type || '').trim().toLowerCase();
+        const canApplyPendingOverlay = (modifyFlow === 'followup_appointment' || modifyFlow === 'modify_appointment');
+        const pendingTests = canApplyPendingOverlay ? getPendingTestsForPatientFromModifyContext(pid) : [];
         const patientTbs = tbsLabel(tb?.cce_level_tbs);
         const patientTubeSet = new Set();
         let patientTotal = 0;
@@ -2986,7 +3164,8 @@ function renderReview() {
         const panelRows = tb.panels.map((section, idx) => {
           const panelName = section?.panel?.pname || `Panel ${idx + 1}`;
           const billing = section?.billing || {};
-          const selectedTests = section?.selected_tests || [];
+          const baseSelectedTests = section?.selected_tests || [];
+          const selectedTests = canApplyPendingOverlay ? applyPendingChildOverlay(baseSelectedTests, pendingTests) : baseSelectedTests;
           const testCount = selectedTests.length;
           const selectedMode = normalizeChargeModeCode(billing.selected_charge_mode || billing.charge_mode_code || '');
           const isPayingPanel = selectedMode === 'P';
@@ -3196,6 +3375,10 @@ function confirmBooking() {
       const pid = String(p.patient_id || '');
       const tb = ensureTbObject(pid);
       const tbsCode = normalizePatientTbs(tb.cce_level_tbs);
+      if (!tbsCode) {
+        alert(`${p.full_name || pid} ke liye Test Booking Status select karna mandatory hai.`);
+        return;
+      }
       const count = Number(p.staged_prescription_file_count || 0);
       if (tbsCode === 2 && count <= 0) {
         alert(`${p.full_name || pid} prescription upload is pending...`);
@@ -3233,6 +3416,7 @@ function confirmBooking() {
       additional_discount_value: Number(wizardData.appointment.additional_discount_value || 0),
       additional_discount_amount: Number(wizardData.appointment.additional_discount_amount || 0),
       additional_discount_by_patient: wizardData.appointment.additional_discount_by_patient || {},
+      pending_tests_map_snapshot: wizardData?.modify?.pending_tests_map || {},
       patient_tests_meta_map: testsMetaMap
     };
 
@@ -3274,6 +3458,21 @@ $(function () {
     if (step >= 3) {
       syncAppointmentTagsFromTopBar();
     }
-    if (step >= 1 && step <= 4) setStep(step);
+    if (step < 1 || step > 4) return;
+    if (step === currentStep) return;
+
+    if (currentStep === 1 && step > 1) {
+      goStep2();
+      return;
+    }
+    if (currentStep === 2 && step > 2) {
+      goStep3();
+      return;
+    }
+    if (currentStep === 3 && step > 3) {
+      goStep4();
+      return;
+    }
+    setStep(step);
   });
 });

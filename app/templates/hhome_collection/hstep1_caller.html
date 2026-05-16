@@ -101,8 +101,18 @@
               <div class="col-md-6"><label class="form-label">Street / Sector</label><input id="a-street" class="form-control" placeholder="Optional"></div>
               <div class="col-md-6"><label class="form-label">Landmark</label><input id="a-landmark" class="form-control" placeholder="Optional"></div>
               <div class="col-md-6"><label class="form-label">City *</label><select id="a-city" class="form-select" required><option value="">Select City</option><option>Delhi</option><option>Faridabad</option><option>Gurgaon</option><option>Noida</option><option>Uttar Pradesh</option></select></div>
-              <div class="col-md-6"><label class="form-label">Colony *</label><select id="a-colony" class="form-select" required></select></div>
-              <div class="col-md-6"><label class="form-label">Pincode</label><input id="a-pincode" class="form-control" readonly></div>
+              <div class="col-md-6">
+                <label class="form-label">Colony *</label>
+                <select id="a-colony" class="form-select" required></select>
+                <input id="a-colony-free" class="form-control mt-1 d-none" placeholder="Enter colony name">
+              </div>
+              <div class="col-md-6">
+                <div class="d-flex align-items-center gap-1 mb-1">
+                  <label class="form-label mb-0">Pincode</label>
+                  <input id="a-colony-manual" type="checkbox" style="accent-color:#001f54; width:14px; height:14px;">
+                </div>
+                <input id="a-pincode" class="form-control" readonly>
+              </div>
               <div class="col-md-6"><label class="form-label">Route</label><input id="a-route" class="form-control" readonly></div>
               <div class="col-md-6"><label class="form-label">Google Location</label><input id="a-google-location" class="form-control" placeholder="Optional Google Maps URL"></div>
               <div class="col-12"><label class="form-label">Access Notes</label><textarea id="a-access" class="form-control" placeholder="Optional"></textarea></div>
@@ -120,5 +130,3 @@
     </div>
   </div>
 </div>
-
-

@@ -45,7 +45,7 @@ BHASIN7001_DB = {
     "host": os.getenv("B7001_HOST", "localhost"),
     "user": os.getenv("B7001_USER", "root"),
     "password": os.getenv("B7001_PASSWORD", ""),
-    "database": os.getenv("B7001_NAME", "bhasin_7001"),
+    "database": os.getenv("B7001_NAME", "bhasin_7001_new"),
 }
 
 

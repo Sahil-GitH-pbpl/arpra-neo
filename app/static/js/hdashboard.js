@@ -4,9 +4,10 @@ function statusBadge(status) {
     1: { text: 'Assigned', cls: 'warning' },
     2: { text: 'Started', cls: 'started' },
     3: { text: 'Completed', cls: 'success' },
-    4: { text: 'Cancelled', cls: 'danger' }
+    4: { text: 'Cancelled', cls: 'danger' },
+    5: { text: 'P Completed', cls: 'info' }
   };
-  const legacyMap = { Pending: 0, Assigned: 1, Started: 2, Completed: 3, Cancelled: 4 };
+  const legacyMap = { Pending: 0, Assigned: 1, Started: 2, Completed: 3, Cancelled: 4, PCompleted: 5 };
   const code = Number.isFinite(Number(status)) ? Number(status) : legacyMap[status];
   const meta = map[code] || map[0];
   if (code === 2) return `<span class="badge text-bg-${meta.cls}" style="background:#7f2eb4 !important;">${meta.text}</span>`;
@@ -14,8 +15,8 @@ function statusBadge(status) {
 }
 
 function statusText(status) {
-  const labels = { 0: 'Pending', 1: 'Assigned', 2: 'Started', 3: 'Completed', 4: 'Cancelled' };
-  const legacyMap = { Pending: 0, Assigned: 1, Started: 2, Completed: 3, Cancelled: 4 };
+  const labels = { 0: 'Pending', 1: 'Assigned', 2: 'Started', 3: 'Completed', 4: 'Cancelled', 5: 'P Completed' };
+  const legacyMap = { Pending: 0, Assigned: 1, Started: 2, Completed: 3, Cancelled: 4, PCompleted: 5 };
   const code = Number.isFinite(Number(status)) ? Number(status) : legacyMap[status];
   return labels[code] || 'Pending';
 }
@@ -403,7 +404,7 @@ function renderDashboardRows(rows) {
         <td>${String(r.assigned_phlebo_name || '-').trim() || '-'}</td>
         <td class="dash-actions-cell">
           <button class="btn btn-sm btn-outline-primary dash-action-btn btn-view" data-booking-id="${r.booking_id || r.id}" data-appointment-id="${r.appointment_id || 0}">View</button>
-          ${[3, 4].includes(statusCode)
+          ${[3, 4, 5].includes(statusCode)
             ? '<button class="btn btn-sm btn-outline-secondary dash-action-btn" type="button" disabled>Modify</button>'
             : `<button class="btn btn-sm btn-outline-secondary dash-action-btn btn-modify" data-booking-id="${r.booking_id || r.id}" data-appointment-id="${r.appointment_id || 0}">Modify</button>`}
           ${statusCode === 1
@@ -464,9 +465,9 @@ function renderExpandedDetails(b, rowStatusCode, bookingId, appointmentId, rowTy
         ${[0, 1].includes(Number(rowStatusCode || 0))
           ? `<button class="btn btn-sm btn-outline-secondary dash-action-btn dash-expand-action-reschedule" data-booking-id="${Number(bookingId || b.id || 0)}">Reschedule</button>`
           : ''}
-        ${Number(rowStatusCode || 0) !== 4
-          ? `<button class="btn btn-sm btn-outline-danger dash-action-btn dash-expand-action-cancel" data-booking-id="${Number(bookingId || b.id || 0)}" data-appointment-id="${Number(appointmentId || 0)}">Cancel</button>`
-          : ''}
+        ${[3, 4, 5].includes(Number(rowStatusCode || 0))
+          ? `<button class="btn btn-sm btn-outline-secondary dash-action-btn" type="button" disabled>Cancel</button>`
+          : `<button class="btn btn-sm btn-outline-danger dash-action-btn dash-expand-action-cancel" data-booking-id="${Number(bookingId || b.id || 0)}" data-appointment-id="${Number(appointmentId || 0)}">Cancel</button>`}
       </div>
     </div>
     <div class="dash-expand-patient-grid">${patientBlocks || '<div class="text-muted">No patient details.</div>'}</div>
@@ -617,8 +618,6 @@ function openCancelReasonModal(bookingId) {
   $('#cancel-appointment-id').val(String(appointmentId || 0));
   $('#cancel-reason-select').val('');
   $('input[name="cancel-reschedule-requested"][value="no"]').prop('checked', true);
-  $('input[name="cancel-new-slot-known"][value="no"]').prop('checked', true);
-  $('#cancel-new-slot-known-wrap').addClass('d-none');
 
   const allSlots = generateRescheduleSlots();
   $('#cancel-new-slot').html(allSlots.map((slot) => `<option value="${slot}">${slot}</option>`).join(''));
@@ -647,17 +646,6 @@ function openCancelReasonModal(bookingId) {
 
   $('input[name="cancel-reschedule-requested"]').off('change.cancelRes').on('change.cancelRes', function () {
     const yes = $('input[name="cancel-reschedule-requested"]:checked').val() === 'yes';
-    if (yes) {
-      $('#cancel-new-slot-known-wrap').removeClass('d-none');
-    } else {
-      $('#cancel-new-slot-known-wrap').addClass('d-none');
-      $('input[name="cancel-new-slot-known"][value="no"]').prop('checked', true);
-      $('#cancel-new-date, #cancel-new-slot').prop('disabled', true);
-    }
-  });
-
-  $('input[name="cancel-new-slot-known"]').off('change.cancelKnown').on('change.cancelKnown', function () {
-    const yes = $('input[name="cancel-new-slot-known"]:checked').val() === 'yes';
     $('#cancel-new-date, #cancel-new-slot').prop('disabled', !yes);
   });
 
@@ -670,7 +658,6 @@ function openCancelReasonModal(bookingId) {
       return;
     }
     const rescheduleRequested = $('input[name="cancel-reschedule-requested"]:checked').val() === 'yes';
-    const newSlotKnown = $('input[name="cancel-new-slot-known"]:checked').val() === 'yes';
     const newDate = String($('#cancel-new-date').val() || '').trim();
     const newSlot = String($('#cancel-new-slot').val() || '').trim();
     $.ajax({
@@ -680,7 +667,7 @@ function openCancelReasonModal(bookingId) {
         appointment_id: appointmentId,
         reason_text: reason,
         reschedule_requested: rescheduleRequested ? 1 : 0,
-        new_slot_known: newSlotKnown ? 1 : 0,
+        new_slot_known: rescheduleRequested ? 1 : 0,
         proposed_visit_date: newDate,
         proposed_time_slot: newSlot,
       }),

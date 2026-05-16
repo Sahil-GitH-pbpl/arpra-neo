@@ -50,7 +50,8 @@ def assign_bookings_commit():
 
 @hhome_collection_dashboard_bp.get("/hhome-collection/booking/<int:booking_id>")
 def booking_detail(booking_id: int):
-    booking = service.get_booking_full(booking_id)
+    appointment_id = int(request.args.get("appointment_id", 0) or 0)
+    booking = service.get_booking_full(booking_id, appointment_id=appointment_id)
     if not booking:
         return jsonify({"ok": False, "message": "Not found"}), 404
     return jsonify({"ok": True, "booking": booking})
