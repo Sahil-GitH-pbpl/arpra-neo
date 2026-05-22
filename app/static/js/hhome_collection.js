@@ -14,6 +14,7 @@ let wizardData = {
 let selectedPatientTags = [];
 let selectedPermanentTags = [];
 let selectedBookingTags = [];
+let selectedPatientsCache = [];
 let tagOptions = {
   patient: [],
   permanent: [],
@@ -471,6 +472,8 @@ function bindEditPatientButtons() {
 
 function renderSelectedPatientsState(list) {
   const selectedList = list || [];
+  selectedPatientsCache = Array.isArray(selectedList) ? selectedList.slice() : [];
+  wizardData.selectedPatients = selectedPatientsCache.slice();
   if (!selectedList.length) {
     $('#selected-patient-tags').html('<div class="text-muted">No patients selected yet.</div>');
     return;
@@ -1210,6 +1213,11 @@ function hydrateStep1FromSession() {
 
     if (ctxRes?.ok && ctxRes?.active && ctxRes?.context) {
       const ctx = ctxRes.context || {};
+      const existingModify = wizardData.modify || {};
+      const sameModifySession =
+        Number(existingModify.booking_id || 0) === Number(ctx.booking_id || 0) &&
+        Number(existingModify.appointment_id || 0) === Number(ctx.appointment_id || 0);
+      const hasLocalTestsState = Object.keys(wizardData.testsBilling || {}).length > 0;
       wizardData.modify = {
         booking_id: Number(ctx.booking_id || 0),
         appointment_id: Number(ctx.appointment_id || 0),
@@ -1222,8 +1230,16 @@ function hydrateStep1FromSession() {
       renderSelectedTags($('#ap-permanent-tags'), selectedPermanentTags, 'ap-permanent-tag-remove');
       renderSelectedTags($('#ap-booking-tags'), selectedBookingTags, 'ap-booking-tag-remove');
       refreshTagDropdowns();
-      wizardData.testsBilling = ctx.tests_billing_map || {};
-      wizardData.modify.pending_tests_map = ctx.pending_tests_map || {};
+      const shouldHydrateTestsFromContext = !(sameModifySession && hasLocalTestsState);
+      wizardData.modify.original_tests_billing_map = deepClone(ctx.tests_billing_map || {});
+      if (shouldHydrateTestsFromContext) {
+        wizardData.testsBilling = ctx.tests_billing_map || {};
+        wizardData.modify.pending_tests_map = ctx.pending_tests_map || {};
+        wizardData.modify.parent_context_map = ctx.parent_context_map || {};
+        if (wizardData.modify.flow_type === 'auto_followup_pending_child') {
+          wizardData.modify.parent_seed_tests_map = buildZeroSeedTestsMap(ctx.tests_billing_map || {});
+        }
+      }
       wizardData.searchedMobile = ctx.searched_mobile || wizardData.searchedMobile;
     } else {
       wizardData.modify = {};
@@ -1522,6 +1538,11 @@ function savePatient() {
   if (!data.full_name) return alert('Patient Full Name is required.');
   if (!data.gender) return alert('Gender is required.');
   if (!data.contact_mobile) return alert('Contact No is required.');
+  const panelCompany = String(data.panel_company || '').trim().toUpperCase();
+  const cardNumber = String(data.card_number || '').trim();
+  if ((panelCompany === 'NHA CGHS' || panelCompany === 'CAPF AYUSHMAN') && !cardNumber) {
+    return alert('Card no is mandatory for NHA CGHS and CAPF AYUSHMAN panel company');
+  }
 
   const documentFiles = Array.from($('#p-patient-documents')[0]?.files || []);
   if (documentFiles.length > 5) {
@@ -1538,7 +1559,7 @@ function savePatient() {
 
   const isEdit = !!editingPatientId;
   if (!isEdit && isAppointmentLevelFlow()) {
-    return alert('Appointment flow me Add Patient allowed nahi hai.');
+    return alert('Adding a patient is not allowed in appointment flow.');
   }
   const formData = new FormData();
   Object.entries(data).forEach(([key, value]) => {
@@ -1904,30 +1925,34 @@ function getPendingTestsForPatientFromModifyContext(patientId) {
   const pTb = pendingMap[pid] || pendingMap[Number(pid)] || null;
   if (!pTb || typeof pTb !== 'object') return [];
 
-  const out = [];
-  const pushList = (rows, rootCode = '') => {
-    (rows || []).forEach((t) => {
-      if (!t || typeof t !== 'object') return;
+  const rows = [];
+  if (Array.isArray(pTb.selected_tests)) {
+    rows.push(...pTb.selected_tests);
+  }
+  if (Array.isArray(pTb.panels)) {
+    pTb.panels.forEach((sec) => {
+      if (sec && typeof sec === 'object' && Array.isArray(sec.selected_tests)) {
+        rows.push(...sec.selected_tests);
+      }
+    });
+  }
+  const rootCode = String(pTb?.parent?.booked_code || '').trim();
+  return rows
+    .filter((t) => t && typeof t === 'object' && String(t.booked_code || '').trim())
+    .map((t) => {
       const code = String(t.booked_code || '').trim();
-      if (!code) return;
       const directRoot = String(t.root_booked_code || '').trim();
-      out.push({
+      return {
         booked_code: code,
         description: String(t.description || code).trim(),
         parent_booked_code: String(t.parent_booked_code || '').trim(),
-        root_booked_code: directRoot || String(rootCode || '').trim(),
+        root_booked_code: directRoot || rootCode,
         charge: 0,
         mrp: 0,
         max_discount: 0,
         max_allowed_discount: 0
-      });
+      };
     });
-  };
-
-  pushList(pTb.selected_tests, pTb?.parent?.booked_code || '');
-  (pTb.panels || []).forEach((sec) => pushList(sec?.selected_tests || [], pTb?.parent?.booked_code || ''));
-  (pTb.items || []).forEach((it) => pushList(it?.pending || [], pTb?.parent?.booked_code || ''));
-  return out;
 }
 
 function applyPendingChildOverlay(selectedTests, pendingTests) {
@@ -1973,6 +1998,99 @@ function applyPendingChildOverlay(selectedTests, pendingTests) {
     seen.add(code);
     return true;
   });
+}
+
+function getModifyFlowType() {
+  return String(wizardData?.modify?.flow_type || '').trim().toLowerCase();
+}
+
+function deepClone(obj) {
+  try {
+    return JSON.parse(JSON.stringify(obj || {}));
+  } catch (_) {
+    return {};
+  }
+}
+
+function getTbTestCodes(tb) {
+  const out = new Set();
+  if (!tb || typeof tb !== 'object') return out;
+  const pushRows = (rows) => {
+    (rows || []).forEach((t) => {
+      const code = String(t?.booked_code || '').trim().toUpperCase();
+      if (code) out.add(code);
+    });
+  };
+  pushRows(tb.selected_tests);
+  (tb.panels || []).forEach((sec) => pushRows(sec?.selected_tests || []));
+  return out;
+}
+
+function isZeroBilledSeedTest(testRow) {
+  const t = testRow && typeof testRow === 'object' ? testRow : {};
+  return Number(t.charge || 0) === 0 &&
+    Number(t.mrp || 0) === 0 &&
+    Number(t.max_discount || 0) === 0 &&
+    Number(t.max_allowed_discount || 0) === 0;
+}
+
+function buildZeroSeedTestsMap(testsMap) {
+  const src = testsMap && typeof testsMap === 'object' ? testsMap : {};
+  const out = {};
+  const filterRows = (rows) => (Array.isArray(rows) ? rows.filter((t) => isZeroBilledSeedTest(t)) : []);
+  Object.keys(src).forEach((pidKey) => {
+    const pid = String(pidKey || '').trim();
+    if (!pid) return;
+    const tb = src[pidKey] || {};
+    const clone = deepClone(tb);
+    clone.selected_tests = filterRows(tb.selected_tests);
+    clone.panels = Array.isArray(tb.panels)
+      ? tb.panels.map((sec) => ({
+        ...(sec || {}),
+        selected_tests: filterRows(sec?.selected_tests)
+      })).filter((sec) => (sec.selected_tests || []).length)
+      : [];
+    if (!clone.selected_tests.length && clone.panels.length) {
+      clone.selected_tests = clone.panels[0]?.selected_tests || [];
+    }
+    if (clone.selected_tests.length || clone.panels.length) {
+      out[pid] = clone;
+    }
+  });
+  return out;
+}
+
+function getSeedParentCodesForPatient(patientId) {
+  const pid = String(patientId || '');
+  if (!pid) return new Set();
+  const seedMap = wizardData?.modify?.parent_context_map || wizardData?.modify?.parent_seed_tests_map || {};
+  const seedTb = seedMap[pid] || seedMap[Number(pid)] || null;
+  return getTbTestCodes(seedTb);
+}
+
+function extractTbCodesMap(mapObj) {
+  const src = mapObj && typeof mapObj === 'object' ? mapObj : {};
+  const out = {};
+  Object.keys(src).forEach((pidKey) => {
+    const pid = String(pidKey || '').trim();
+    if (!pid) return;
+    const set = getTbTestCodes(src[pidKey]);
+    out[pid] = Array.from(set).sort();
+  });
+  return out;
+}
+
+function hasModifyTestsChanged() {
+  if (!isModifyContextActive()) return false;
+  const originalMap = wizardData?.modify?.original_tests_billing_map || {};
+  const currentMap = wizardData?.testsBilling || {};
+  const orig = extractTbCodesMap(originalMap);
+  const curr = extractTbCodesMap(currentMap);
+  try {
+    return JSON.stringify(orig) !== JSON.stringify(curr);
+  } catch (_) {
+    return true;
+  }
 }
 
 function hydrateStep2() {
@@ -2149,10 +2267,53 @@ function loadRouteSlotGrid(forcedRoute) {
 
 function renderRouteSlotGrid(res) {
   const routes = res.routes || [];
+  const routeColors = res.route_colors || {};
   const bookings = res.bookings || [];
   const selectedRoute = (res.selected_route || slotSelectedRoute || '').trim();
   const dateVal = res.date || ($('#slot-grid-date').val() || isoTomorrow());
   $('#slot-grid-meta').text(`Total bookings: ${res.total_bookings || 0}`);
+
+  function parseColorToRgb(input) {
+    const txt = String(input || '').trim().toLowerCase();
+    if (!txt) return null;
+    const named = {
+      red: [239, 68, 68],
+      green: [34, 197, 94],
+      blue: [59, 130, 246],
+      yellow: [234, 179, 8],
+      orange: [249, 115, 22],
+      purple: [168, 85, 247],
+      pink: [236, 72, 153],
+      brown: [120, 72, 40],
+      gray: [107, 114, 128],
+      grey: [107, 114, 128],
+      black: [15, 23, 42]
+    };
+    if (named[txt]) return named[txt];
+    const hex = txt.replace('#', '');
+    if (/^[0-9a-f]{3}$/i.test(hex)) {
+      return [
+        parseInt(hex[0] + hex[0], 16),
+        parseInt(hex[1] + hex[1], 16),
+        parseInt(hex[2] + hex[2], 16)
+      ];
+    }
+    if (/^[0-9a-f]{6}$/i.test(hex)) {
+      return [
+        parseInt(hex.slice(0, 2), 16),
+        parseInt(hex.slice(2, 4), 16),
+        parseInt(hex.slice(4, 6), 16)
+      ];
+    }
+    return null;
+  }
+
+  function routeBgStyle(routeName, isHeader, isSelected) {
+    const rgb = parseColorToRgb(routeColors[routeName] || '');
+    if (!rgb) return '';
+    const alpha = isHeader ? (isSelected ? 0.4 : 0.28) : (isSelected ? 0.28 : 0.18);
+    return ` style="background-color: rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha});"`;
+  }
 
   const indexed = {};
   bookings.forEach(b => {
@@ -2165,7 +2326,7 @@ function renderRouteSlotGrid(res) {
   let html = '<table class="slot-grid-table"><thead><tr><th class="slot-time-col">Time Slot</th>';
   routes.forEach(r => {
     const cls = r === selectedRoute ? 'route-selected' : '';
-    html += `<th class="${cls}">${r}</th>`;
+    html += `<th class="${cls}"${routeBgStyle(r, true, r === selectedRoute)}>${r}</th>`;
   });
   html += '</tr></thead><tbody>';
 
@@ -2176,14 +2337,19 @@ function renderRouteSlotGrid(res) {
       const items = indexed[`${r}|${s.key}`] || [];
       let cell = '';
       items.forEach(it => {
-        const info = [it.city, it.area].filter(Boolean).join(', ');
-        const mobile = it.mobile ? ` (${it.mobile})` : '';
-        cell += `<span class="slot-book-item">${info}${mobile}</span>`;
+        const line1 = [it.area, it.city].filter(Boolean).join(', ');
+        const mobile = String(it.mobile || '').trim();
+        cell += `
+          <span class="slot-book-item">
+            <span class="slot-book-line1">${escHtml(line1 || '-')}</span>
+            <span class="slot-book-line2">${escHtml(mobile || '-')}</span>
+          </span>
+        `;
       });
       if (r === selectedRoute) {
         cell += `<button class="btn btn-primary slot-pick-btn" data-date="${dateVal}" data-slot="${s.label}">+ Select</button>`;
       }
-      html += `<td class="${cls}">${cell || '<span class="text-muted">-</span>'}</td>`;
+      html += `<td class="${cls}"${routeBgStyle(r, false, r === selectedRoute)}>${cell || '<span class="text-muted">-</span>'}</td>`;
     });
     html += '</tr>';
   });
@@ -2545,7 +2711,7 @@ function legacyOpenPanelTestsModal(patientId) {
   const tb = ensureTbObject(pid);
   const compCatId = tb.billing?.comp_cat_id ?? '';
   if (!compCatId) {
-    alert('Panel company select karke billing category load karein, phir Book Test karein.');
+    alert('Select a panel company, load the billing category, then click Book Test.');
     return;
   }
 
@@ -2579,7 +2745,7 @@ function legacyOpenPanelTestsModal(patientId) {
 }
 
 function renderPanelTestsList(tests, emptyMessage) {
-  const list = Array.isArray(tests) ? tests : [];
+  const list = filterTestsByPatientGender(tests, activePanelPicker?.patientId || '');
   if (!list.length) {
     $('#panel-tests-list').html(`<div class="text-muted p-2">${escHtml(emptyMessage || 'No tests mapped')}</div>`);
     return;
@@ -2616,6 +2782,7 @@ function renderPanelTestsList(tests, emptyMessage) {
           data-test-code="${escHtml(t.test_code || '')}"
           data-testcode1="${escHtml(t.testcode1 || '')}"
           data-booked-code="${escHtml(t.booked_code || '')}"
+          data-gender-rule="${escHtml(t.gender_rule || '')}"
           data-description="${escHtml(t.description || '')}"
           data-charge="${escHtml(t.charge || '')}"
           data-mrp="${escHtml(t.mrp || '')}"
@@ -2645,6 +2812,7 @@ function renderPanelTestsList(tests, emptyMessage) {
       test_code: String($(this).data('test-code') || ''),
       testcode1: String($(this).data('testcode1') || ''),
       booked_code: String($(this).data('booked-code') || ''),
+      gender_rule: String($(this).data('gender-rule') || ''),
       description: String($(this).data('description') || ''),
       charge: Number($(this).data('charge') || 0),
       mrp: Number($(this).data('mrp') || 0),
@@ -2791,7 +2959,7 @@ function loadPanelChildTests(parentGcode, parentScode, parentTestCode) {
     parent_scode: parentScode,
     parent_test_code: parentTestCode
   }, function (res) {
-    const tests = res.tests || [];
+    const tests = filterTestsByPatientGender(res.tests || [], activePanelPicker?.patientId || '');
     if (!tests.length) {
       $('#panel-child-tests-list').html('<div class="text-muted p-2">No child tests found</div>');
       return;
@@ -2879,13 +3047,37 @@ function selectedTestOwnerMap(patientId, currentPanelIndex) {
   return map;
 }
 
+function getSelectedPatientGender(patientId) {
+  const pid = String(patientId || '').trim();
+  if (!pid) return '';
+  const rows = Array.isArray(wizardData.selectedPatients) ? wizardData.selectedPatients : selectedPatientsCache;
+  const hit = (rows || []).find((p) => String(p?.patient_id || p?.id || '').trim() === pid);
+  return String(hit?.gender || '').trim().toLowerCase();
+}
+
+function genderRuleAllowsPatient(testItem, patientGender) {
+  const rule = String(testItem?.gender_rule || '').trim();
+  const gender = String(patientGender || '').trim().toLowerCase();
+  if (!rule || rule === '1') return true;
+  if (rule === '2') return gender === 'male';
+  if (rule === '3') return gender === 'female';
+  return true;
+}
+
+function filterTestsByPatientGender(tests, patientId) {
+  const list = Array.isArray(tests) ? tests : [];
+  const gender = getSelectedPatientGender(patientId);
+  if (!gender) return list;
+  return list.filter((t) => genderRuleAllowsPatient(t, gender));
+}
+
 function openPanelTestsModal(patientId, panelIndex = 0) {
   const pid = String(patientId);
   const idx = Number(panelIndex || 0);
   const section = getPanelSection(pid, idx);
   const compCatId = section.billing?.comp_cat_id ?? '';
   if (!compCatId) {
-    alert('Panel company select karke billing category load karein, phir Book Test karein.');
+    alert('Select a panel company, load the billing category, then click Book Test.');
     return;
   }
 
@@ -3070,19 +3262,19 @@ function goStep4() {
     for (let idx = 0; idx < patientTb.panels.length; idx += 1) {
       const section = getPanelSection(pid, idx);
       if (!section?.panel?.pname || !section?.billing?.comp_cat_id) {
-        alert('Har panel section ke liye panel company select karke billing category load karna required hai.');
+        alert('For each panel section, selecting a panel company and loading the billing category is required.');
         return;
       }
       const selectedMode = normalizeChargeModeCode(section.billing.selected_charge_mode || section.billing.charge_mode_code || '');
       if (!selectedMode || selectedMode.length > 1) {
-        alert('Har panel section ke liye Credit ya Paying charge mode select karna required hai.');
+        alert('For each panel section, selecting either Credit or Paying charge mode is required.');
         return;
       }
       for (const t of section.selected_tests || []) {
         const code = testSelKey(t);
         if (!code) continue;
         if (seenCodes[code] !== undefined) {
-          alert(`Test ${code} same patient ke liye already dusre panel me selected hai.`);
+          alert(`Test ${code} is already selected in another panel for the same patient.`);
           return;
         }
         seenCodes[code] = idx;
@@ -3153,8 +3345,13 @@ function renderReview() {
       const rows = patients.map(p => {
         const pid = String(p.patient_id);
         const tb = ensureTbObject(pid);
-        const modifyFlow = String(wizardData?.modify?.flow_type || '').trim().toLowerCase();
-        const canApplyPendingOverlay = (modifyFlow === 'followup_appointment' || modifyFlow === 'modify_appointment');
+        const modifyFlow = getModifyFlowType();
+        const isAutoFollowupPendingFlow = (modifyFlow === 'auto_followup_pending_child');
+        const canApplyPendingOverlay = (
+          modifyFlow === 'followup_appointment' ||
+          modifyFlow === 'modify_appointment' ||
+          isAutoFollowupPendingFlow
+        );
         const pendingTests = canApplyPendingOverlay ? getPendingTestsForPatientFromModifyContext(pid) : [];
         const patientTbs = tbsLabel(tb?.cce_level_tbs);
         const patientTubeSet = new Set();
@@ -3165,7 +3362,27 @@ function renderReview() {
           const panelName = section?.panel?.pname || `Panel ${idx + 1}`;
           const billing = section?.billing || {};
           const baseSelectedTests = section?.selected_tests || [];
-          const selectedTests = canApplyPendingOverlay ? applyPendingChildOverlay(baseSelectedTests, pendingTests) : baseSelectedTests;
+          let selectedTests = [];
+          if (isAutoFollowupPendingFlow) {
+            const seedParentCodes = getSeedParentCodesForPatient(pid);
+            const filteredCurrent = (baseSelectedTests || []).filter((t) => {
+              const code = String(t?.booked_code || '').trim().toUpperCase();
+              return code && !seedParentCodes.has(code);
+            });
+            const pendingForSection = idx === 0 ? (pendingTests || []) : [];
+            const merged = [...pendingForSection, ...filteredCurrent];
+            const seen = new Set();
+            selectedTests = merged.filter((t) => {
+              const code = String(t?.booked_code || '').trim().toUpperCase();
+              if (!code || seen.has(code)) return false;
+              seen.add(code);
+              return true;
+            });
+          } else {
+            selectedTests = canApplyPendingOverlay
+              ? applyPendingChildOverlay(baseSelectedTests, pendingTests)
+              : baseSelectedTests;
+          }
           const testCount = selectedTests.length;
           const selectedMode = normalizeChargeModeCode(billing.selected_charge_mode || billing.charge_mode_code || '');
           const isPayingPanel = selectedMode === 'P';
@@ -3253,14 +3470,15 @@ function renderReview() {
         const cappedTotalDiscount = baseDiscount + effectiveAdditional;
         wizardData.appointment = wizardData.appointment || {};
         const isModifyFlow = isModifyContextActive();
+        const testsChangedInModify = hasModifyTestsChanged();
         const savedFinalDiscount = getDbSavedFinalDiscount();
         const savedAdditionalDiscount = getDbSavedAdditionalDiscount();
-        const additionalDisplay = isModifyFlow
+        const additionalDisplay = (isModifyFlow && !testsChangedInModify)
           ? (savedAdditionalDiscount > 0 ? savedAdditionalDiscount : effectiveAdditional)
           : effectiveAdditional;
         wizardData.appointment.additional_discount_amount = additionalDisplay;
         wizardData.appointment.additional_discount_by_patient = patientAdditionalById;
-        const finalDiscountDisplay = isModifyFlow
+        const finalDiscountDisplay = (isModifyFlow && !testsChangedInModify)
           ? (savedFinalDiscount > 0 ? savedFinalDiscount : (baseDiscount + additionalDisplay))
           : cappedTotalDiscount;
         const computedNet = Math.max(0, subTotal - Number(finalDiscountDisplay || 0));
@@ -3376,7 +3594,7 @@ function confirmBooking() {
       const tb = ensureTbObject(pid);
       const tbsCode = normalizePatientTbs(tb.cce_level_tbs);
       if (!tbsCode) {
-        alert(`${p.full_name || pid} ke liye Test Booking Status select karna mandatory hai.`);
+        alert(`Selecting Test Booking Status is mandatory for ${p.full_name || pid}.`);
         return;
       }
       const count = Number(p.staged_prescription_file_count || 0);
@@ -3417,6 +3635,7 @@ function confirmBooking() {
       additional_discount_amount: Number(wizardData.appointment.additional_discount_amount || 0),
       additional_discount_by_patient: wizardData.appointment.additional_discount_by_patient || {},
       pending_tests_map_snapshot: wizardData?.modify?.pending_tests_map || {},
+      parent_context_map_snapshot: wizardData?.modify?.parent_context_map || wizardData?.modify?.parent_seed_tests_map || {},
       patient_tests_meta_map: testsMetaMap
     };
 
@@ -3460,19 +3679,7 @@ $(function () {
     }
     if (step < 1 || step > 4) return;
     if (step === currentStep) return;
-
-    if (currentStep === 1 && step > 1) {
-      goStep2();
-      return;
-    }
-    if (currentStep === 2 && step > 2) {
-      goStep3();
-      return;
-    }
-    if (currentStep === 3 && step > 3) {
-      goStep4();
-      return;
-    }
+    // Free step navigation: allow direct jump across wizard steps.
     setStep(step);
   });
 });

@@ -1267,6 +1267,19 @@ label,
   line-height: 1.2;
 }
 
+.slot-book-line1 {
+  display: block;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.slot-book-line2 {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  color: #334155;
+}
+
 .slot-pick-btn {
   margin-top: 4px;
   padding: 2px 8px;
@@ -2400,7 +2413,7 @@ button.dash-doc-thumb {
 .h-assign-grid-table {
   border-collapse: collapse;
   width: 100%;
-  min-width: 2500px;
+  min-width: 3000px;
   table-layout: fixed;
 }
 
@@ -2427,6 +2440,11 @@ button.dash-doc-thumb {
   z-index: 5;
   font-size: 12px;
   font-weight: 700;
+}
+
+.h-assign-grid-table .asg-route-th,
+.h-assign-grid-table .asg-slot-cell {
+  width: 132px;
 }
 
 .asg-route-head {
@@ -2524,6 +2542,10 @@ button.dash-doc-thumb {
   font-weight: 700;
   color: #111827;
   margin-top: 1px;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
 }
 
 .asg-city-short {

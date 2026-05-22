@@ -18,6 +18,12 @@ def assign_booking():
     return render_template("hhome_collection/hassign_booking.html", default_date=default_date)
 
 
+@hhome_collection_dashboard_bp.get("/hhome-collection/leaderboard")
+def leaderboard():
+    # Temporary HC leaderboard screen (explicitly documented in README for future removal).
+    return render_template("hhome_collection/hleaderboard.html")
+
+
 @hhome_collection_dashboard_bp.get("/hhome-collection/dashboard-data")
 def dashboard_data():
     params = {
@@ -28,6 +34,14 @@ def dashboard_data():
         "search": request.args.get("search"),
     }
     return jsonify({"ok": True, "rows": service.dashboard_rows(params)})
+
+
+@hhome_collection_dashboard_bp.get("/hhome-collection/leaderboard-data")
+def leaderboard_data():
+    # TEMP: simple aggregated leaderboard for booking creation + completion ownership.
+    date_from = (request.args.get("date_from") or "").strip()
+    date_to = (request.args.get("date_to") or "").strip()
+    return jsonify({"ok": True, **service.leaderboard_counts(date_from=date_from, date_to=date_to)})
 
 
 @hhome_collection_dashboard_bp.get("/hhome-collection/assign-booking-data")

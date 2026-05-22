@@ -62,18 +62,18 @@
   .phlebo-summary-page .table-horizontal-scroll::-webkit-scrollbar-thumb:hover { background-color: #08306b; }
   .phlebo-summary-page .table-vertical-scroll { overflow-y: auto; max-height: calc(100vh - 200px); }
   .phlebo-summary-page table { border-collapse: collapse; width: auto; min-width: 100%; font-size: 13px; background: white; }
-    .phlebo-summary-page th, .phlebo-summary-page td { border: 1px solid #ccc; padding: 2px 4px; text-align: center; min-width: 120px; line-height: 1.15; }
+    .phlebo-summary-page th, .phlebo-summary-page td { border: 1px solid #ccc; padding: 4px; text-align: center; min-width: 120px; line-height: 1.15; }
   .phlebo-summary-page th { background-color: #2e7d32; color: white; position: sticky; top: 0; z-index: 1; }
   .phlebo-summary-page .time-slot { background-color: #e0f2f1; font-weight: bold; min-width: 150px; }
   .phlebo-summary-page tr:nth-child(even) { background-color: #f9f9f9; }
   .phlebo-summary-page .loading { font-style: italic; color: #777; padding: 20px; }
-    .phlebo-summary-page .booking-cell-stack { display: flex; flex-direction: column; gap: 3px; align-items: stretch; }
-    .phlebo-summary-page .booking-chip { display: block; line-height: 1.18; }
-    .phlebo-summary-page .status-0 { background-color: #c9c4c4 !important; padding: 1px 4px; border-radius: 3px; margin: 0 1px; }
-    .phlebo-summary-page .status-1 { background-color: #c9c4c4 !important; padding: 1px 4px; border-radius: 3px; margin: 0 1px; }
-    .phlebo-summary-page .status-2 { background-color: #559bf7 !important; padding: 1px 4px; border-radius: 3px; margin: 0 1px; }
-    .phlebo-summary-page .status-3 { background-color: #b4e2b6 !important; padding: 1px 4px; border-radius: 3px; margin: 0 1px; }
-    .phlebo-summary-page .status-4 { background-color: #ebaeb4 !important; padding: 1px 4px; border-radius: 3px; margin: 0 1px; }
+    .phlebo-summary-page .booking-cell-stack { display: flex; flex-direction: column; gap: 3px; align-items: center; }
+    .phlebo-summary-page .booking-chip { display: inline-block; width: 100%; max-width: 250px; line-height: 1.18; }
+    .phlebo-summary-page .status-0 { background-color: #c9c4c4 !important; padding: 4px 0; border-radius: 3px; margin: 0 1px; }
+    .phlebo-summary-page .status-1 { background-color: #c9c4c4 !important; padding: 4px 0; border-radius: 3px; margin: 0 1px; }
+    .phlebo-summary-page .status-2 { background-color: #559bf7 !important; padding: 4px 0; border-radius: 3px; margin: 0 1px; }
+    .phlebo-summary-page .status-3 { background-color: #b4e2b6 !important; padding: 4px 0; border-radius: 3px; margin: 0 1px; }
+    .phlebo-summary-page .status-4 { background-color: #ebaeb4 !important; padding: 4px 0; border-radius: 3px; margin: 0 1px; }
     .phlebo-summary-page .late-indicator { display: inline-block; margin-left: 3px; padding: 0 4px; font-size: 9px; font-weight: bold; border-radius: 3px; color: white; line-height: 1.25; }
   .phlebo-summary-page .ls-indicator { background-color: #ff9800; }
   .phlebo-summary-page .lc-indicator { background-color: #f44336; }
@@ -367,7 +367,9 @@
               const colony = (b.colony_name_snapshot || b.colony_name || "").trim();
               const city = (b.city || "").trim();
               const mobile = (b.caller_mobile || "").trim();
-              const text = `${colony ? `<span class="booking-colony">${colony}</span>${city ? `, ${city}` : ""}` : (city || "-")}${mobile ? `<br>(${mobile})` : ""}`;
+              const line1 = colony ? `<span class="booking-colony">${colony}</span>` : (city || "-");
+              const line2 = [city, mobile].filter(Boolean).join(", ") || "-";
+              const text = `${line1}<br>${line2}`;
             const stat = getVisualStatusClass(b);
             const lateStatus = checkLateStatus(b, slotStartMins, slotEndMins);
             let indicatorsHtml = "";
@@ -402,7 +404,7 @@
 
   function exportToExcel() {
     const table = document.querySelector("#summary-area table");
-    if (!table) { alert("â›” Pehle data load karo table me."); return; }
+    if (!table) { alert("Please load data into the table first."); return; }
     const ws = XLSX.utils.table_to_sheet(table);
     const range = XLSX.utils.decode_range(ws["!ref"]);
     for (let C = range.s.c; C <= range.e.c; ++C) {

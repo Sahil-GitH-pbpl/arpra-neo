@@ -377,7 +377,7 @@ function renderDashboardRows(rows) {
       <tr class="dash-data-row">
         <td class="${r.row_type === 'APPOINTMENT' ? 'dash-sr-apmt' : ''}">
           <span class="dash-expand-trigger" data-expand-row="${rowExpandId}" data-booking-id="${bookingId}" data-appointment-id="${Number(r.appointment_id || 0)}" data-row-type="${String(r.row_type || 'BOOKING')}" data-row-status="${Number(r.booking_status || 0)}">
-            <span class="dash-expand-arrow">&#9656;</span> ${idx + 1}
+            <span class="dash-expand-arrow">&#9656;</span> ${bookingId || '-'}
           </span>
         </td>
         <td>

@@ -541,6 +541,8 @@ def modify_booking():
     payload["_session_ref"] = session
 
     flow_type = (ctx.get("flow_type") or "").strip().lower()
+    modify_scope = (ctx.get("modify_scope") or "").strip().lower()
+    payload["_modify_flow_type"] = flow_type
     if flow_type == "followup_appointment":
         payload["followup_reason_text"] = (ctx.get("reason_text") or "").strip()
         result = service.create_followup_appointment(
@@ -552,7 +554,7 @@ def modify_booking():
             payload=payload,
             actor_user_id=session.get("user_id"),
         )
-    elif flow_type == "modify_appointment":
+    elif flow_type == "modify_appointment" or flow_type == "auto_followup_pending_child" or modify_scope == "appointment":
         result = service.modify_appointment(
             booking_id=booking_id,
             appointment_id=int(ctx.get("appointment_id") or 0),
@@ -623,6 +625,4 @@ def print_slip(booking_id: int):
     if not booking:
         return "Booking not found", 404
     return render_template("hhome_collection/hprint_slip.html", booking=booking)
-
-
 
